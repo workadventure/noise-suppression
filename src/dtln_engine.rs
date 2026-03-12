@@ -1,10 +1,11 @@
 // dtln_engine.rs
 use std::ptr;
 use std::slice;
+use std::sync::Arc;
 
 use anyhow::Result;
 use num::Complex;
-use realfft::RealFftPlanner;
+use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 
 use crate::constants::*;
 use crate::tflite::*;
@@ -23,12 +24,23 @@ pub struct DtlnEngine {
     out_buffer: [f32; DTLN_BLOCK_LEN],
     states_1: [f32; DTLN_BLOCK_LEN],
     states_2: [f32; DTLN_BLOCK_LEN],
+    r2c: Arc<dyn RealToComplex<f32>>,
+    c2r: Arc<dyn ComplexToReal<f32>>,
+    fft_in: Vec<f32>,
+    fft_spectrum: Vec<Complex<f32>>,
+    fft_forward_scratch: Vec<Complex<f32>>,
+    ifft_output: Vec<f32>,
+    fft_inverse_scratch: Vec<Complex<f32>>,
 }
 
 unsafe impl Send for DtlnEngine {}
 
 impl DtlnEngine {
     pub fn new() -> Option<Self> {
+        let mut planner = RealFftPlanner::<f32>::new();
+        let r2c = planner.plan_fft_forward(DTLN_BLOCK_LEN);
+        let c2r = planner.plan_fft_inverse(DTLN_BLOCK_LEN);
+
         let model1_data = include_bytes!("../model/model_quant_1.tflite");
         let model1_size = model1_data.len();
 
@@ -124,6 +136,13 @@ impl DtlnEngine {
             out_buffer: [0.0; DTLN_BLOCK_LEN],
             states_1: [0.0; DTLN_BLOCK_LEN],
             states_2: [0.0; DTLN_BLOCK_LEN],
+            fft_in: r2c.make_input_vec(),
+            fft_spectrum: r2c.make_output_vec(),
+            fft_forward_scratch: r2c.make_scratch_vec(),
+            ifft_output: c2r.make_output_vec(),
+            fft_inverse_scratch: c2r.make_scratch_vec(),
+            r2c,
+            c2r,
         })
     }
 
@@ -155,22 +174,22 @@ impl DtlnEngine {
         }
 
         let mut in_mag = [0f32; DTLN_FFT_OUT_SIZE];
-        let mut in_phase = [0f32; DTLN_FFT_OUT_SIZE];
         let mut estimated_block = [0f32; DTLN_BLOCK_LEN];
 
-        // Prepare FFT input
-        let mut planner = RealFftPlanner::<f32>::new();
-        let r2c = planner.plan_fft_forward(DTLN_BLOCK_LEN);
-        let mut fft_in = self.in_buffer.to_vec();
-        let mut fft_spectrum = r2c.make_output_vec();
+        self.fft_in.copy_from_slice(&self.in_buffer);
 
         // Perform real-to-complex FFT
-        r2c.process(&mut fft_in, &mut fft_spectrum).unwrap();
+        self.r2c
+            .process_with_scratch(
+                &mut self.fft_in,
+                &mut self.fft_spectrum,
+                &mut self.fft_forward_scratch,
+            )
+            .unwrap();
 
         // Generate magnitude and phase
         for i in 0..DTLN_FFT_OUT_SIZE {
-            in_mag[i] = fft_spectrum[i].norm();
-            in_phase[i] = fft_spectrum[i].arg();
+            in_mag[i] = self.fft_spectrum[i].norm();
         }
 
         // Prepare inputs for model 1
@@ -201,33 +220,27 @@ impl DtlnEngine {
             ptr::copy_nonoverlapping(out_states1_ptr, self.states_1.as_mut_ptr(), DTLN_BLOCK_LEN);
         }
 
-        // Apply mask and reconstruct complex spectrum
+        // Apply the real-valued mask directly in the complex domain.
+        // This preserves the original phase without atan2/cos/sin work.
         for i in 0..DTLN_FFT_OUT_SIZE {
-            let magnitude = in_mag[i] * out_mask[i];
-            let phase = in_phase[i];
-            let real = magnitude * phase.cos();
-            let imag = magnitude * phase.sin();
-            fft_spectrum[i] = Complex::new(real, imag);
+            self.fft_spectrum[i] *= out_mask[i];
         }
 
-        // Handle DC component (i = 0)
-        let magnitude = in_mag[0] * out_mask[0];
-        fft_spectrum[0] = Complex::new(magnitude, 0.0);
-
-        // Handle Nyquist component (i = N/2)
-        let magnitude = in_mag[DTLN_FFT_OUT_SIZE - 1] * out_mask[DTLN_FFT_OUT_SIZE - 1];
-        fft_spectrum[DTLN_FFT_OUT_SIZE - 1] = Complex::new(magnitude, 0.0);
-
-        // Prepare for inverse FFT
-        let c2r = planner.plan_fft_inverse(DTLN_BLOCK_LEN);
-        let mut ifft_output = c2r.make_output_vec();
+        self.fft_spectrum[0].im = 0.0;
+        self.fft_spectrum[DTLN_FFT_OUT_SIZE - 1].im = 0.0;
 
         // Perform complex-to-real IFFT
-        c2r.process(&mut fft_spectrum, &mut ifft_output).unwrap();
+        self.c2r
+            .process_with_scratch(
+                &mut self.fft_spectrum,
+                &mut self.ifft_output,
+                &mut self.fft_inverse_scratch,
+            )
+            .unwrap();
 
         // Normalize the IFFT output
         for i in 0..DTLN_BLOCK_LEN {
-            estimated_block[i] = ifft_output[i] / DTLN_BLOCK_LEN as f32;
+            estimated_block[i] = self.ifft_output[i] / DTLN_BLOCK_LEN as f32;
         }
 
         // Prepare inputs for model 2

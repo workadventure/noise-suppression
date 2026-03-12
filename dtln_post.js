@@ -1,5 +1,6 @@
 const DTLN_SAMPLE_BLOCK_SIZE = 512;
 const DTLN_SIZEOF_FLOAT32 = 4;
+const wasmBufferStates = new Map();
 let resolveReady;
 const ready = new Promise((resolve) => {
   resolveReady = resolve;
@@ -17,20 +18,47 @@ function getHeapF32() {
   throw new Error("DTLN WebAssembly memory is not initialized");
 }
 
+function getHandleState(handle) {
+  const heap = getHeapF32();
+  const cached = wasmBufferStates.get(handle);
+
+  if (cached && cached.heapBuffer === heap.buffer) {
+    return cached;
+  }
+
+  const audioBufferPtr = Module._dtln_get_audio_buffer(handle) / DTLN_SIZEOF_FLOAT32;
+  const state = {
+    audioBufferPtr,
+    heapBuffer: heap.buffer,
+    view: heap.subarray(audioBufferPtr, audioBufferPtr + DTLN_SAMPLE_BLOCK_SIZE),
+  };
+
+  wasmBufferStates.set(handle, state);
+  return state;
+}
+
 // Export interface that matches the node plugin.
 let DtlnPlugin = {
   ready,
   dtln_create: () => {
-    return Module._dtln_create_wasm();
+    const handle = Module._dtln_create_wasm();
+    getHandleState(handle);
+    return handle;
   },
-  dtln_stop: (handle) => Module._dtln_destroy_wasm(handle),
-  dtln_destroy: (handle) => Module._dtln_destroy_wasm(handle),
+  dtln_stop: (handle) => {
+    wasmBufferStates.delete(handle);
+    return Module._dtln_destroy_wasm(handle);
+  },
+  dtln_destroy: (handle) => {
+    wasmBufferStates.delete(handle);
+    return Module._dtln_destroy_wasm(handle);
+  },
   dtln_denoise: (handle, input, output) => {
     const heap = getHeapF32();
-    let audioBufferPtr = Module._dtln_get_audio_buffer(handle) / DTLN_SIZEOF_FLOAT32;
-    heap.set(input, audioBufferPtr);
+    const state = getHandleState(handle);
+    heap.set(input, state.audioBufferPtr);
     Module._dtln_denoise_wasm(handle);
-    output.set(heap.subarray(audioBufferPtr, audioBufferPtr + DTLN_SAMPLE_BLOCK_SIZE));
+    output.set(state.view);
     return false;
   },
 };
