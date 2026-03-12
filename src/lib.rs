@@ -1,19 +1,24 @@
-// Primary export functions for the NEON module.
-use dtln_processor::DtlnDeferredProcessor;
-use dtln_processor::DtlnProcessEngine;
-
-use std::io::Result;
-use std::sync::{Arc, Mutex};
 pub mod constants;
 pub mod dtln_engine;
+#[cfg(not(target_os = "emscripten"))]
 pub mod dtln_processor;
 pub mod dtln_utilities;
 pub mod tflite;
 
+#[cfg(not(target_os = "emscripten"))]
+use dtln_processor::DtlnDeferredProcessor;
+#[cfg(not(target_os = "emscripten"))]
+use dtln_processor::DtlnProcessEngine;
+#[cfg(not(target_os = "emscripten"))]
 use neon::prelude::*;
-
+#[cfg(not(target_os = "emscripten"))]
 use neon::types::buffer::TypedArray;
+#[cfg(not(target_os = "emscripten"))]
+use std::io::Result;
+#[cfg(not(target_os = "emscripten"))]
+use std::sync::{Arc, Mutex};
 
+#[cfg(not(target_os = "emscripten"))]
 fn dtln_create_napi(mut cx: FunctionContext) -> JsResult<JsBox<Arc<Mutex<DtlnDeferredProcessor>>>> {
     let dtln_processor = DtlnDeferredProcessor::new();
     let Ok(dtln_processor) = dtln_processor else {
@@ -23,6 +28,7 @@ fn dtln_create_napi(mut cx: FunctionContext) -> JsResult<JsBox<Arc<Mutex<DtlnDef
     Ok(cx.boxed(Arc::new(Mutex::new(dtln_processor))))
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn dtln_stop_napi(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let dtln_processor = cx.argument::<JsBox<Arc<Mutex<DtlnDeferredProcessor>>>>(0)?;
     dtln_processor.lock().unwrap().stop();
@@ -37,6 +43,7 @@ fn dtln_stop_napi(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
 * @returns {boolean} - True if the processing thread is backed up.
 */
+#[cfg(not(target_os = "emscripten"))]
 fn dtln_denoise_napi(mut cx: FunctionContext) -> JsResult<JsBoolean> {
     if cx.len() != 3 {
         return cx.throw_error("Invalid number of arguments, expected <engine: JsBox, samples: Float32Array, output: Float32Array>");
@@ -77,6 +84,7 @@ fn dtln_denoise_napi(mut cx: FunctionContext) -> JsResult<JsBoolean> {
     }
 }
 
+#[cfg(not(target_os = "emscripten"))]
 #[neon::main]
 fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("dtln_denoise", dtln_denoise_napi)?;

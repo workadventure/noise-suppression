@@ -14,5 +14,11 @@ function getRandomValues(abv) {
 // emulation layer, and so we have to provide them. It's *very* important that
 // the getRandomValues polyfill isn't used anywhere else, because it is using
 // Math.random(), and will not produce a secure seed.
-let crypto = typeof AudioWorkletGlobalScope !== 'undefined'?{getRandomValues}:window.crypto;
-let performance = typeof AudioWorkletGlobalScope !== 'undefined'?{now:()=>Date.now()}:window.performance;
+let crypto =
+  typeof AudioWorkletGlobalScope !== 'undefined'
+    ? { getRandomValues }
+    : globalThis.crypto;
+let performance =
+  typeof AudioWorkletGlobalScope !== 'undefined'
+    ? { now: () => Date.now() }
+    : globalThis.performance;

@@ -24,7 +24,7 @@ anyhow = "1.0.89"
 rustfft = { version = "6.2.0", features = ["avx"] }
 realfft = "3.4.0"
 
-[dependencies.neon]
+[target.'cfg(not(target_os = "emscripten"))'.dependencies.neon]
 version = "0.10"
 default-features = false
 features = ["napi-6"]
