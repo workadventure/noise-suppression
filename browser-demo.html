@@ -32,12 +32,14 @@
           const handle = dtln.dtln_create();
           const input = new Float32Array(512);
           const output = new Float32Array(512);
+          const start = performance.now();
 
           dtln.dtln_denoise(handle, input, output);
+          const elapsedMs = performance.now() - start;
           dtln.dtln_stop(handle);
 
           status.textContent =
-            "Loaded successfully. A zeroed 512-sample frame was processed in the browser.";
+            `Loaded successfully. A zeroed 512-sample frame was processed in the browser in ${elapsedMs.toFixed(3)} ms.`;
         } catch (error) {
           console.error(error);
           status.textContent = `Failed to load: ${error}`;
