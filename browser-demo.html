@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>dtln-rs Browser Demo</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        margin: 2rem;
+        line-height: 1.4;
+      }
+      code {
+        background: #f3f3f3;
+        padding: 0.1rem 0.3rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>dtln-rs Browser Demo</h1>
+    <p id="status">Loading <code>dtln.js</code>...</p>
+
+    <script type="module">
+      import createDtlnModule from "./dtln.js";
+
+      (async () => {
+        const status = document.getElementById("status");
+
+        try {
+          const dtln = await createDtlnModule();
+          await dtln.ready;
+          const handle = dtln.dtln_create();
+          const input = new Float32Array(512);
+          const output = new Float32Array(512);
+
+          dtln.dtln_denoise(handle, input, output);
+          dtln.dtln_stop(handle);
+
+          status.textContent =
+            "Loaded successfully. A zeroed 512-sample frame was processed in the browser.";
+        } catch (error) {
+          console.error(error);
+          status.textContent = `Failed to load: ${error}`;
+        }
+      })();
+    </script>
+  </body>
+</html>

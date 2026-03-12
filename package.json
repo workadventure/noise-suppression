@@ -3,7 +3,7 @@
   "version": "0.3.1",
   "description": "Real-time noise suppression for audio using Dual-Signal Transformation LSTM Network (DTLN)",
   "main": "dtln.js",
-  "types": "index.d.ts",
+  "types": "dtln.d.ts",
   "browser": "dtln.js",
   "keywords": [
     "noise-suppression",
@@ -44,6 +44,7 @@
     "dtln_pre.js",
     "dtln_post.js",
     "dtln.js",
+    "dtln.d.ts",
     "index.d.ts",
     "example.ts",
     "README.md",

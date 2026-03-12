@@ -4,7 +4,7 @@
 const { execSync } = require("child_process");
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-let { copyFileSync, readFile, writeFileSync, readFileSync, writeFile } = require("fs");
+let { copyFileSync, existsSync } = require("fs");
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 let { join } = require("path");
 
@@ -63,7 +63,7 @@ execSync("cargo clean");
 // Run cargo build
 try {
   execSync(
-    "cargo build --release --message-format=json-render-diagnostics --target wasm32-unknown-emscripten",
+    "cargo build --release --message-format=json-render-diagnostics --target wasm32-unknown-emscripten --bin dtln-rs",
     { stdio: "inherit" }
   );
 } catch (e) {
@@ -71,26 +71,33 @@ try {
   process.exit(1);
 }
 
-// Copy artifacts
-const wasm = join(
-  __dirname,
-  "..",
-  "target",
-  "wasm32-unknown-emscripten",
-  "release",
-  "dtln_rs.wasm"
-);
-const js = join(__dirname, "..", "target", "wasm32-unknown-emscripten", "release", "dtln-rs.js");
-const wasmDest = join(__dirname, "..", "dtln_rs.wasm");
+const releaseDir = join(__dirname, "..", "target", "wasm32-unknown-emscripten", "release");
+const jsCandidates = ["dtln-rs.js", "dtln_rs.js"];
+const wasmCandidates = ["dtln-rs.wasm", "dtln_rs.wasm"];
 const jsDest = join(__dirname, "..", "dtln.js");
+const wasmDest = join(__dirname, "..", "dtln_rs.wasm");
+
+const js = jsCandidates.map((name) => join(releaseDir, name)).find((file) => existsSync(file));
+const wasm = wasmCandidates.map((name) => join(releaseDir, name)).find((file) => existsSync(file));
+
+if (!js) {
+  console.error("Unable to find the generated JavaScript artifact in", releaseDir);
+  process.exit(1);
+}
 
 console.log("Copying artifacts...");
-console.log(" " + wasm + " -> " + wasmDest);
 console.log(" " + js + " -> " + jsDest);
+if (wasm) {
+  console.log(" " + wasm + " -> " + wasmDest);
+} else {
+  console.log(" No standalone .wasm emitted (SINGLE_FILE build)");
+}
 
 try {
-  copyFileSync(wasm, wasmDest);
   copyFileSync(js, jsDest);
+  if (wasm) {
+    copyFileSync(wasm, wasmDest);
+  }
 } catch (err) {
   console.error(err);
   process.exit(1);
