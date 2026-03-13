@@ -50,6 +50,16 @@ export interface DtlnPlugin {
   ): boolean;
 
   /**
+   * Resets internal profiling counters for a denoiser instance.
+   */
+  dtln_profile_reset(denoiser: DenoiserHandle): void;
+
+  /**
+   * Returns aggregated timing data collected inside the wasm engine.
+   */
+  dtln_profile_get(denoiser: DenoiserHandle): DtlnProfile;
+
+  /**
    * Stops and frees a denoiser instance.
    */
   dtln_stop(denoiser: DenoiserHandle): void;
@@ -58,6 +68,25 @@ export interface DtlnPlugin {
    * Alias of `dtln_stop`.
    */
   dtln_destroy(denoiser: DenoiserHandle): void;
+}
+
+export interface DtlnProfile {
+  denoiseCalls: number;
+  inferCalls: number;
+  denoiseTotalMs: number;
+  blockPrepMs: number;
+  outputCopyMs: number;
+  inferTotalMs: number;
+  fftForwardMs: number;
+  magnitudeMs: number;
+  model1CopyMs: number;
+  model1InvokeMs: number;
+  maskMs: number;
+  ifftMs: number;
+  normalizeMs: number;
+  model2CopyMs: number;
+  model2InvokeMs: number;
+  overlapAddMs: number;
 }
 
 /**

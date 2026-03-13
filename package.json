@@ -2,9 +2,21 @@
   "name": "@hayatialikeles/dtln-rs",
   "version": "0.3.1",
   "description": "Real-time noise suppression for audio using Dual-Signal Transformation LSTM Network (DTLN)",
-  "main": "dtln.js",
-  "types": "dtln.d.ts",
-  "browser": "dtln.js",
+  "main": "dtln.node.js",
+  "types": "index.d.ts",
+  "browser": "dtln.browser.mjs",
+  "exports": {
+    ".": {
+      "browser": "./dtln.browser.mjs",
+      "require": "./dtln.node.js",
+      "default": "./dtln.node.js"
+    },
+    "./browser": {
+      "types": "./dtln.browser.d.ts",
+      "default": "./dtln.browser.mjs"
+    },
+    "./package.json": "./package.json"
+  },
   "keywords": [
     "noise-suppression",
     "audio",
@@ -34,6 +46,7 @@
   "files": [
     "src/",
     "model/",
+    "experimental/litert/",
     "tflite/*.tar.bz2",
     "prebuilt/",
     "scripts/postinstall.js",
@@ -41,6 +54,8 @@
     "Cargo.toml",
     "Cargo.lock",
     "dtln.node.js",
+    "dtln.browser.mjs",
+    "dtln.browser.d.ts",
     "dtln_pre.js",
     "dtln_post.js",
     "dtln.js",
@@ -86,5 +101,9 @@
   "devDependencies": {
     "cargo-cp-artifact": "^0.1",
     "mocha": "^10.8.2"
+  },
+  "dependencies": {
+    "@litertjs/core": "^2.0.0",
+    "fft.js": "^4.0.4"
   }
 }

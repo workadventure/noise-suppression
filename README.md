@@ -6,7 +6,7 @@
 ![Node Version](https://img.shields.io/badge/node-%3E%3D14.0.0-brightgreen.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)
 
-**High-performance real-time noise suppression for Node.js**
+**High-performance real-time noise suppression for Node.js and browsers**
 
 *Built with Rust 🦀 | Powered by DTLN Neural Network 🧠 | Production Ready 🚀*
 
@@ -18,7 +18,7 @@
 
 ### 🎯 Overview
 
-**dtln-rs** is a high-performance audio noise suppression library for Node.js, built on the [Dual-Signal Transformation LSTM Network (DTLN)](https://github.com/breizhn/DTLN) architecture. Implemented in Rust for maximum performance and packaged as a native Node.js addon, it provides near real-time noise reduction capabilities perfect for:
+**dtln-rs** is a high-performance audio noise suppression library for Node.js and browsers, built on the [Dual-Signal Transformation LSTM Network (DTLN)](https://github.com/breizhn/DTLN) architecture. It uses a native Rust addon on Node.js and a LiteRT.js backend in browsers, providing near real-time noise reduction for:
 
 - 🎙️ Voice calls and conferencing (WebRTC integration)
 - 🎵 Audio streaming applications
@@ -31,10 +31,11 @@
 - ⚡ **Ultra-fast**: Processes audio **55x faster than real-time** on modern hardware
 - 🎯 **High Quality**: Based on state-of-the-art DTLN neural network architecture
 - 🔌 **Plug & Play**: Prebuilt binaries included - no Rust installation required
+- 🌐 **Browser-ready**: Bundlers can resolve to the LiteRT.js browser backend automatically
 - 🌍 **Cross-platform**: macOS (Intel & Apple Silicon), Linux (x64 & ARM64)
 - 🪶 **Lightweight**: Only ~4MB of ML models, optimized for edge deployment
 - 🔒 **Thread-safe**: Designed for concurrent processing
-- 📦 **Zero dependencies**: Self-contained native module
+- 🧠 **Portable runtime**: Native Node addon plus browser-side LiteRT.js execution
 
 ### 🚀 Quick Start
 
@@ -87,6 +88,24 @@ dtln.dtln_stop(denoiser);
 ```
 
 See [example.ts](example.ts) for comprehensive TypeScript examples.
+
+#### Browser Usage
+
+```typescript
+import createDtlnModule from '@hayatialikeles/dtln-rs/browser';
+
+const dtln = await createDtlnModule();
+await dtln.ready;
+
+const denoiser = dtln.dtln_create();
+const inputAudio = new Float32Array(512);
+const outputAudio = new Float32Array(512);
+
+dtln.dtln_denoise(denoiser, inputAudio, outputAudio);
+dtln.dtln_stop(denoiser);
+```
+
+The browser backend enables LiteRT.js threads automatically when the page is cross-origin isolated (`COOP`/`COEP`).
 
 ### 📊 Performance Benchmarks
 

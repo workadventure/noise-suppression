@@ -4,7 +4,7 @@ use std::io::Result;
 use std::path::Path;
 use wav::Header;
 
-use crate::dtln_engine::{dtln_create, dtln_denoise, DtlnEngine};
+use crate::dtln_engine::{dtln_create, dtln_denoise, DtlnEngine, DtlnProfileStats};
 
 pub fn write_pcm32_to_wav(samples: Vec<f32>, filename: &str, audiorate: u32) -> Result<()> {
     // Convert to s16
@@ -113,4 +113,12 @@ pub fn dtln_denoise_global(id: u32) -> Result<()> {
             "Failed to denoise",
         ))
     }
+}
+
+pub fn dtln_reset_profile_global(id: u32) {
+    wasm_denoiser_from_id(id).engine.reset_profile();
+}
+
+pub fn dtln_get_profile_global(id: u32) -> DtlnProfileStats {
+    wasm_denoiser_from_id(id).engine.profile()
 }
