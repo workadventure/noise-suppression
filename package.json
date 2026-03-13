@@ -12,14 +12,17 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
+    "./audio-worklet": {
+      "types": "./dist/audio-worklet.d.ts",
+      "import": "./dist/audio-worklet.js",
+      "default": "./dist/audio-worklet.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
     "dist/",
     "README.md",
-    "LICENSE",
-    "NOTICE",
-    "LICENSE-3rdparty.csv"
+    "LICENSE"
   ],
   "scripts": {
     "dev": "vite",
@@ -49,10 +52,10 @@
   "homepage": "https://github.com/WorkAdventure/noise-suppression#readme",
   "license": "MIT",
   "dependencies": {
-    "@litertjs/core": "^2.0.0",
     "fft.js": "^4.0.4"
   },
   "devDependencies": {
+    "@litertjs/core": "^2.0.0",
     "typescript": "^5.8.2",
     "vite": "^5.4.14",
     "vite-plugin-static-copy": "^1.0.6"
