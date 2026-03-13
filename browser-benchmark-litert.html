@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>dtln-rs LiteRT.js Benchmark</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        margin: 2rem;
+        line-height: 1.4;
+      }
+      pre {
+        background: #f8f8f8;
+        padding: 1rem;
+        overflow-x: auto;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "@litertjs/core": "./node_modules/@litertjs/core/dist/index.js",
+          "@litertjs/wasm-utils": "./node_modules/@litertjs/wasm-utils/dist/index.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <h1>dtln-rs LiteRT.js Benchmark</h1>
+    <p id="status">Preparing benchmark...</p>
+    <pre id="summary"></pre>
+    <pre id="details"></pre>
+
+    <script type="module">
+      import createDtlnModule from "./dtln.browser.mjs";
+
+      function seededNoise(length, seed = 123456789) {
+        const out = new Float32Array(length);
+        let state = seed >>> 0;
+        for (let i = 0; i < length; i++) {
+          state = (1664525 * state + 1013904223) >>> 0;
+          out[i] = (state / 0xffffffff) * 2 - 1;
+        }
+        return out;
+      }
+
+      function formatSummary(profile) {
+        const stages = Object.entries(profile.stages)
+          .filter(([name]) => !name.endsWith("_total"))
+          .sort((a, b) => b[1].totalMs - a[1].totalMs);
+
+        return [
+          `denoise calls: ${profile.denoiseCalls}`,
+          `infer calls: ${profile.inferCalls}`,
+          `mean dtln_denoise: ${profile.stages.denoise_total.meanMs.toFixed(3)} ms`,
+          `p95 dtln_denoise: ${profile.stages.denoise_total.p95Ms.toFixed(3)} ms`,
+          `mean infer: ${profile.stages.infer_total.meanMs.toFixed(3)} ms`,
+          "",
+          ...stages.map(([name, stage]) =>
+            `${name.padEnd(14)} mean=${stage.meanMs.toFixed(3)} ms  ` +
+            `p95=${stage.p95Ms.toFixed(3)} ms  ` +
+            `share=${(stage.inferShare * 100).toFixed(1)}%`
+          ),
+        ].join("\n");
+      }
+
+      (async () => {
+        const status = document.getElementById("status");
+        const summary = document.getElementById("summary");
+        const details = document.getElementById("details");
+
+        try {
+          const warmupIterations = 40;
+          const benchmarkIterations = 300;
+          const dtln = await createDtlnModule({
+            enableProfiling: true,
+          });
+          await dtln.ready;
+
+          const handle = dtln.dtln_create();
+          const input = seededNoise(512);
+          const output = new Float32Array(512);
+
+          status.textContent = `Warming up for ${warmupIterations} calls...`;
+          for (let i = 0; i < warmupIterations; i++) {
+            dtln.dtln_denoise(handle, input, output);
+          }
+
+          dtln.reset_profile(handle);
+
+          status.textContent = `Running ${benchmarkIterations} measured calls...`;
+          for (let i = 0; i < benchmarkIterations; i++) {
+            dtln.dtln_denoise(handle, input, output);
+          }
+
+          const profile = dtln.get_profile(handle);
+          dtln.dtln_stop(handle);
+
+          summary.textContent = formatSummary(profile);
+          details.textContent = JSON.stringify(profile, null, 2);
+          status.textContent = "Benchmark complete.";
+        } catch (error) {
+          console.error(error);
+          status.textContent = `Benchmark failed: ${error}`;
+        }
+      })();
+    </script>
+  </body>
+</html>

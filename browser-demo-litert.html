@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>dtln-rs Browser Demo</title>
+    <title>dtln-rs LiteRT.js Browser Backend</title>
     <style>
       body {
         font-family: sans-serif;
@@ -13,6 +13,11 @@
       code {
         background: #f3f3f3;
         padding: 0.1rem 0.3rem;
+      }
+      pre {
+        background: #f8f8f8;
+        padding: 1rem;
+        overflow-x: auto;
       }
     </style>
     <script type="importmap">
@@ -25,32 +30,37 @@
     </script>
   </head>
   <body>
-    <h1>dtln-rs Browser Demo</h1>
-    <p id="status">Loading <code>dtln.browser.mjs</code>...</p>
+    <h1>dtln-rs LiteRT.js Browser Backend</h1>
+    <p id="status">Loading the default browser backend and compiling the DTLN models...</p>
+    <pre id="details"></pre>
 
     <script type="module">
       import createDtlnModule from "./dtln.browser.mjs";
 
       (async () => {
         const status = document.getElementById("status");
+        const details = document.getElementById("details");
 
         try {
-          const dtln = await createDtlnModule();
+          const dtln = await createDtlnModule({
+            logModelDetails: true,
+          });
           await dtln.ready;
+
           const handle = dtln.dtln_create();
           const input = new Float32Array(512);
           const output = new Float32Array(512);
           const start = performance.now();
-
           dtln.dtln_denoise(handle, input, output);
           const elapsedMs = performance.now() - start;
           dtln.dtln_stop(handle);
 
           status.textContent =
-            `Loaded successfully. The default browser LiteRT.js backend processed a zeroed 512-sample frame in ${elapsedMs.toFixed(3)} ms.`;
+            `The default browser backend loaded successfully. A zeroed 512-sample frame was processed in ${elapsedMs.toFixed(3)} ms.`;
+          details.textContent = JSON.stringify(dtln.modelDetails, null, 2);
         } catch (error) {
           console.error(error);
-          status.textContent = `Failed to load: ${error}`;
+          status.textContent = `Failed to load the browser backend: ${error}`;
         }
       })();
     </script>
