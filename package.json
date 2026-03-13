@@ -1,109 +1,60 @@
 {
-  "name": "@hayatialikeles/dtln-rs",
+  "name": "@workadventure/noise-suppression",
   "version": "0.3.1",
-  "description": "Real-time noise suppression for audio using Dual-Signal Transformation LSTM Network (DTLN)",
-  "main": "dtln.node.js",
-  "types": "index.d.ts",
-  "browser": "dtln.browser.mjs",
+  "description": "Browser noise suppression powered by LiteRT.js and DTLN models",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "browser": "./dtln.browser.mjs",
-      "require": "./dtln.node.js",
-      "default": "./dtln.node.js"
-    },
-    "./browser": {
-      "types": "./dtln.browser.d.ts",
-      "default": "./dtln.browser.mjs"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./package.json": "./package.json"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "LICENSE-3rdparty.csv"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run typecheck && vite build && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "preview": "vite preview"
   },
   "keywords": [
     "noise-suppression",
     "audio",
     "dtln",
+    "litert",
+    "litertjs",
+    "browser",
     "webrtc",
     "denoise",
-    "machine-learning",
     "real-time",
-    "audio-processing",
-    "lstm",
-    "tensorflow-lite",
-    "rust",
-    "native-addon"
+    "audio-processing"
   ],
-  "engines": {
-    "node": ">=14.0.0"
-  },
-  "os": [
-    "darwin",
-    "linux",
-    "win32"
-  ],
-  "cpu": [
-    "x64",
-    "arm64"
-  ],
-  "files": [
-    "src/",
-    "model/",
-    "experimental/litert/",
-    "tflite/*.tar.bz2",
-    "prebuilt/",
-    "scripts/postinstall.js",
-    "build.rs",
-    "Cargo.toml",
-    "Cargo.lock",
-    "dtln.node.js",
-    "dtln.browser.mjs",
-    "dtln.browser.d.ts",
-    "dtln_pre.js",
-    "dtln_post.js",
-    "dtln.js",
-    "dtln.d.ts",
-    "index.d.ts",
-    "example.ts",
-    "README.md",
-    "README.tr.md",
-    "DOCKER.md",
-    "LICENSE",
-    "LICENSE-3rdparty.csv",
-    "NOTICE"
-  ],
-  "scripts": {
-    "install-mac-x86_64": "cargo clean && npx cargo-cp-artifact -a cdylib dtln-rs index.node -- cargo build -p dtln-rs --lib --release --message-format=json-render-diagnostics --target x86_64-apple-darwin && cp dtln.node.js dtln.js",
-    "install-mac-arm64": "cargo clean && npx cargo-cp-artifact -a cdylib dtln-rs index.node -- cargo build -p dtln-rs --lib --release --message-format=json-render-diagnostics --target aarch64-apple-darwin && cp dtln.node.js dtln.js",
-    "install-linux-x64": "cargo clean && npx cargo-cp-artifact -a cdylib dtln-rs index.node -- cargo build -p dtln-rs --lib --release --message-format=json-render-diagnostics --target x86_64-unknown-linux-gnu && cp dtln.node.js dtln.js",
-    "install-linux-arm64": "cargo clean && npx cargo-cp-artifact -a cdylib dtln-rs index.node -- cargo build -p dtln-rs --lib --release --message-format=json-render-diagnostics --target aarch64-unknown-linux-gnu && cp dtln.node.js dtln.js",
-    "install-win-x64": "cargo clean && npx cargo-cp-artifact -a cdylib dtln-rs index.node -- cargo build -p dtln-rs --lib --release --message-format=json-render-diagnostics --target x86_64-pc-windows-msvc && copy dtln.node.js dtln.js",
-    "install-win-arm64": "cargo clean && npx cargo-cp-artifact -a cdylib dtln-rs index.node -- cargo build -p dtln-rs --lib --release --message-format=json-render-diagnostics --target aarch64-pc-windows-msvc && copy dtln.node.js dtln.js",
-    "install-wasm": "node ./scripts/install-wasm.js",
-    "build": "npx cargo-cp-artifact -nc index.node -- cargo build --message-format=json-render-diagnostics",
-    "build-debug": "npm run build --",
-    "build-release": "npm run build -- --release",
-    "install-native": "node -e \"const os = require('os'); const platform = process.platform; const arch = process.arch; const scripts = { 'darwin-x64': 'install-mac-x86_64', 'darwin-arm64': 'install-mac-arm64', 'linux-x64': 'install-linux-x64', 'linux-arm64': 'install-linux-arm64', 'win32-x64': 'install-win-x64', 'win32-arm64': 'install-win-arm64' }; const script = scripts[platform + '-' + arch]; if (!script) { console.error('Unsupported platform: ' + platform + '-' + arch); process.exit(1); } require('child_process').execSync('npm run ' + script, { stdio: 'inherit' });\"",
-    "postinstall": "node scripts/postinstall.js",
-    "prepublishOnly": "node -e \"console.log('⚠ Warning: Make sure to build binaries for all platforms before publishing!')\"",
-    "test": "mocha test/*.test.js --timeout 10000",
-    "test:basic": "mocha test/basic.test.js --timeout 5000",
-    "test:integration": "mocha test/integration.test.js --timeout 10000",
-    "test:rust": "cargo test"
-  },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hayatialikeles/dtln-rs.git"
+    "url": "git+https://github.com/WorkAdventure/noise-suppression.git"
   },
   "bugs": {
-    "url": "https://github.com/hayatialikeles/dtln-rs/issues"
+    "url": "https://github.com/WorkAdventure/noise-suppression/issues"
   },
-  "homepage": "https://github.com/hayatialikeles/dtln-rs#readme",
-  "author": "Hayati Ali Keleş <hayati.alikeles@gmail.com>",
+  "homepage": "https://github.com/WorkAdventure/noise-suppression#readme",
   "license": "MIT",
-  "devDependencies": {
-    "cargo-cp-artifact": "^0.1",
-    "mocha": "^10.8.2"
-  },
   "dependencies": {
     "@litertjs/core": "^2.0.0",
     "fft.js": "^4.0.4"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2",
+    "vite": "^5.4.14",
+    "vite-plugin-static-copy": "^1.0.6"
   }
 }

@@ -3,17 +3,61 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>dtln-rs LiteRT.js Manual Benchmark</title>
-    <script type="importmap">
-      {
-        "imports": {
-          "@litertjs/core": "./node_modules/@litertjs/core/dist/index.js",
-          "@litertjs/wasm-utils": "./node_modules/@litertjs/wasm-utils/dist/index.js"
-        }
+    <title>Noise Suppression Manual Benchmark Harness</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        margin: 2rem;
+        line-height: 1.5;
       }
-    </script>
+      code, pre {
+        background: #f6f8fa;
+        border-radius: 8px;
+      }
+      code {
+        padding: 0.15rem 0.35rem;
+      }
+      pre {
+        padding: 1rem;
+        overflow-x: auto;
+      }
+    </style>
   </head>
   <body>
-    <p>Manual benchmark harness.</p>
+    <h1>Noise Suppression Manual Benchmark Harness</h1>
+    <p>
+      This page exposes helper functions on <code>window</code> for ad hoc
+      benchmarking from DevTools.
+    </p>
+    <pre id="instructions">Loading helpers...</pre>
+
+    <script type="module">
+      import {
+        benchmarkNoiseSuppression,
+        formatTimingSummary,
+        maxAbsDiff,
+      } from "./demo/benchmark-utils.ts";
+
+      window.runNoiseSuppressionBenchmark = benchmarkNoiseSuppression;
+      window.formatNoiseSuppressionTimingSummary = formatTimingSummary;
+      window.compareNoiseSuppressionOutputs = maxAbsDiff;
+
+      const instructions = document.getElementById("instructions");
+      instructions.textContent = [
+        "Available helpers:",
+        "  await window.runNoiseSuppressionBenchmark({",
+        "    label: 'single-thread',",
+        "    moduleOptions: { threads: false, numThreads: 1 }",
+        "  })",
+        "",
+        "  await window.runNoiseSuppressionBenchmark({",
+        "    label: 'threaded',",
+        "    moduleOptions: { threads: true, numThreads: 4 }",
+        "  })",
+        "",
+        "  window.formatNoiseSuppressionTimingSummary(result)",
+        "  window.compareNoiseSuppressionOutputs(a, b)",
+      ].join("\n");
+    </script>
   </body>
 </html>

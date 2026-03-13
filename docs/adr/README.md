@@ -17,3 +17,4 @@ technical decisions in this repository.
 ## Index
 
 - [ADR 0001: Use LiteRT.js as the Default Browser Backend](./0001-use-litert-js-for-browser-backend.md)
+- [ADR 0002: Migrate to a Browser-Only Vite Package](./0002-migrate-to-browser-only-vite-package.md)
