@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>dtln-rs Backend Compare</title>
+    <title>Noise Suppression Runtime Compare</title>
     <style>
       body {
         font-family: sans-serif;
@@ -16,107 +16,20 @@
         overflow-x: auto;
       }
     </style>
-    <script type="importmap">
-      {
-        "imports": {
-          "@litertjs/core": "./node_modules/@litertjs/core/dist/index.js",
-          "@litertjs/wasm-utils": "./node_modules/@litertjs/wasm-utils/dist/index.js"
-        }
-      }
-    </script>
   </head>
   <body>
-    <h1>dtln-rs Backend Compare</h1>
+    <h1>Noise Suppression Runtime Compare</h1>
     <p id="status">Preparing benchmark...</p>
     <pre id="summary"></pre>
     <pre id="details"></pre>
 
     <script type="module">
-      import createWasmModule from "./dtln.js";
-      import createLiteRtModule from "./dtln.browser.mjs";
-
-      function seededNoise(length, seed = 123456789) {
-        const out = new Float32Array(length);
-        let state = seed >>> 0;
-        for (let i = 0; i < length; i++) {
-          state = (1664525 * state + 1013904223) >>> 0;
-          out[i] = (state / 0xffffffff) * 2 - 1;
-        }
-        return out;
-      }
-
-      function percentile(values, fraction) {
-        const sorted = [...values].sort((a, b) => a - b);
-        const index = Math.min(
-          sorted.length - 1,
-          Math.max(0, Math.ceil(sorted.length * fraction) - 1)
-        );
-        return sorted[index];
-      }
-
-      function summarizeTimings(samples) {
-        const totalMs = samples.reduce((sum, value) => sum + value, 0);
-        return {
-          count: samples.length,
-          totalMs,
-          meanMs: totalMs / samples.length,
-          p95Ms: percentile(samples, 0.95),
-          minMs: Math.min(...samples),
-          maxMs: Math.max(...samples),
-        };
-      }
-
-      function maxAbsDiff(a, b) {
-        let max = 0;
-        for (let i = 0; i < a.length; i++) {
-          max = Math.max(max, Math.abs(a[i] - b[i]));
-        }
-        return max;
-      }
-
-      async function benchmarkBackend(label, createModule, input, options = {}) {
-        const warmupIterations = options.warmupIterations ?? 40;
-        const benchmarkIterations = options.benchmarkIterations ?? 300;
-
-        const initStart = performance.now();
-        const module = await createModule();
-        await module.ready;
-        const initMs = performance.now() - initStart;
-
-        const handle = module.dtln_create();
-        const output = new Float32Array(input.length);
-
-        for (let i = 0; i < warmupIterations; i++) {
-          module.dtln_denoise(handle, input, output);
-        }
-
-        const timings = [];
-        for (let i = 0; i < benchmarkIterations; i++) {
-          const start = performance.now();
-          module.dtln_denoise(handle, input, output);
-          timings.push(performance.now() - start);
-        }
-
-        module.dtln_stop(handle);
-
-        return {
-          label,
-          initMs,
-          timings: summarizeTimings(timings),
-          output: new Float32Array(output),
-        };
-      }
-
-      function formatResult(result) {
-        return [
-          `${result.label}`,
-          `  init: ${result.initMs.toFixed(3)} ms`,
-          `  mean: ${result.timings.meanMs.toFixed(3)} ms`,
-          `  p95:  ${result.timings.p95Ms.toFixed(3)} ms`,
-          `  min:  ${result.timings.minMs.toFixed(3)} ms`,
-          `  max:  ${result.timings.maxMs.toFixed(3)} ms`,
-        ].join("\n");
-      }
+      import {
+        benchmarkNoiseSuppression,
+        formatTimingSummary,
+        maxAbsDiff,
+        seededNoise,
+      } from "./demo/benchmark-utils.ts";
 
       (async () => {
         const status = document.getElementById("status");
@@ -125,36 +38,47 @@
         const input = seededNoise(512);
 
         try {
-          status.textContent = "Benchmarking current Rust/WASM backend...";
-          const wasmResult = await benchmarkBackend(
-            "current wasm",
-            () => createWasmModule(),
-            input
-          );
+          status.textContent = "Benchmarking forced single-threaded runtime...";
+          const singleThreadResult = await benchmarkNoiseSuppression({
+            label: "single-threaded",
+            input,
+            moduleOptions: {
+              threads: false,
+              numThreads: 1,
+            },
+          });
 
-          status.textContent = "Benchmarking experimental LiteRT.js backend...";
-          const litertResult = await benchmarkBackend(
-            "litert spike",
-            () => createLiteRtModule({ enableProfiling: false }),
-            input
-          );
+          status.textContent = "Benchmarking threaded runtime...";
+          const threadedResult = await benchmarkNoiseSuppression({
+            label: "threaded",
+            input,
+            moduleOptions: {
+              threads: true,
+              numThreads: 4,
+            },
+          });
 
-          const maxDifference = maxAbsDiff(wasmResult.output, litertResult.output);
-          const speedup = wasmResult.timings.meanMs / litertResult.timings.meanMs;
+          const maxDifference = maxAbsDiff(
+            singleThreadResult.output,
+            threadedResult.output
+          );
+          const speedup =
+            singleThreadResult.timings.meanMs / threadedResult.timings.meanMs;
 
           summary.textContent = [
-            formatResult(wasmResult),
+            formatTimingSummary(singleThreadResult),
             "",
-            formatResult(litertResult),
+            formatTimingSummary(threadedResult),
             "",
-            `speedup (wasm / litert): ${speedup.toFixed(2)}x`,
+            `speedup (single-thread / threaded): ${speedup.toFixed(2)}x`,
             `max abs output diff: ${maxDifference.toExponential(6)}`,
+            `crossOriginIsolated: ${String(globalThis.crossOriginIsolated)}`,
           ].join("\n");
 
           details.textContent = JSON.stringify(
             {
-              wasm: wasmResult,
-              litert: litertResult,
+              singleThreaded: singleThreadResult,
+              threaded: threadedResult,
               speedup,
               maxDifference,
             },

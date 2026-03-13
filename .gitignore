@@ -1,5 +1,5 @@
 /target
-index.html
+node_modules
 tflite/conan*
 tflite/Makefile
 tflite/CMakeFiles/*
@@ -12,3 +12,5 @@ tflite/lib/*
 dtln.js
 index.node
 dtln_rs.wasm
+dist
+.vite
