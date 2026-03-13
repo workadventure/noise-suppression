@@ -18,3 +18,5 @@ technical decisions in this repository.
 
 - [ADR 0001: Use LiteRT.js as the Default Browser Backend](./0001-use-litert-js-for-browser-backend.md)
 - [ADR 0002: Migrate to a Browser-Only Vite Package](./0002-migrate-to-browser-only-vite-package.md)
+- [ADR 0003: AudioWorklet Validation and LiteRT.js Loader Limitation](./0003-audio-worklet-validation-and-litert-loader-limitation.md)
+- [ADR 0004: Implement AudioWorklet LiteRT Fork and Benchmark](./0004-implement-audio-worklet-litert-fork-and-benchmark.md)

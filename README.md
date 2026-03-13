@@ -93,6 +93,31 @@ Defaults:
 `dtln_denoise` accepts any input length that is a multiple of `128`, but the
 realtime target remains the standard 512-sample frame.
 
+## AudioWorklet
+
+The package also ships a dedicated AudioWorklet entrypoint that resolves and
+fetches the Wasm/model assets on the main thread, then sends the bytes into the
+processor.
+
+```ts
+import {
+  createNoiseSuppressionAudioWorklet,
+} from "@workadventure/noise-suppression/audio-worklet";
+
+const audioContext = new AudioContext({ sampleRate: 16000 });
+const worklet = await createNoiseSuppressionAudioWorklet(audioContext);
+
+await worklet.ready;
+sourceNode.connect(worklet.node).connect(audioContext.destination);
+```
+
+Notes:
+
+- the worklet initializes asynchronously
+- audio passes through until the denoiser is ready by default
+- the worklet path uses a repository-local LiteRT fork because stock LiteRT.js
+  expects `document` or `importScripts` during Wasm bootstrap
+
 ## Vite development
 
 This repository is a Vite library project.
@@ -137,6 +162,8 @@ Then open one of:
 - `/browser-benchmark-litert.html`
 - `/browser-benchmark-compare.html`
 - `/browser-benchmark-litert-manual.html`
+- `/audio-worklet-validation.html`
+- `/audio-worklet.html`
 
 The compare page now benchmarks forced single-threaded LiteRT against threaded
 LiteRT under cross-origin isolation.

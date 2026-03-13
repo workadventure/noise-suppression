@@ -44,15 +44,18 @@ export default defineConfig(({ command }) => {
     ],
     build: {
       lib: {
-        entry: path.resolve(rootDir, "src/index.ts"),
+        entry: {
+          index: path.resolve(rootDir, "src/index.ts"),
+          "audio-worklet": path.resolve(rootDir, "src/audio-worklet.ts"),
+        },
         name: "NoiseSuppression",
         formats: ["es"],
-        fileName: () => "index.js",
+        fileName: (_format, entryName) => `${entryName}.js`,
       },
       target: "es2022",
       sourcemap: true,
       rollupOptions: {
-        external: ["@litertjs/core", "fft.js"],
+        external: ["fft.js"],
       },
       emptyOutDir: true,
     },
