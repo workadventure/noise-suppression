@@ -115,6 +115,8 @@ Notes:
 
 - the worklet initializes asynchronously
 - audio passes through until the denoiser is ready by default
+- once ready, the processor buffers four 128-sample render quanta into one
+  512-sample DTLN frame and drains a matching output ring buffer
 - the worklet path uses a repository-local LiteRT fork because stock LiteRT.js
   expects `document` or `importScripts` during Wasm bootstrap
 

@@ -51,6 +51,7 @@ export interface NoiseSuppressionAudioWorkletBenchmarkStartMessage {
 export interface NoiseSuppressionAudioWorkletBenchmarkCompleteMessage {
   type: "benchmark-complete";
   frameSamples: number;
+  renderQuantumSamples: number;
   summary: NoiseSuppressionAudioWorkletBenchmarkSummary;
 }
 

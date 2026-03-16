@@ -21,6 +21,7 @@
     "src/**/*.ts",
     "src/**/*.d.ts",
     "demo/**/*.ts",
+    "test/**/*.ts",
     "vite-env.d.ts"
   ]
 }
