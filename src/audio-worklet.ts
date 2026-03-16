@@ -1,9 +1,9 @@
 import bundledLiteRtWasmUrl from "../forks/litertjs-core/wasm/litert_wasm_internal.wasm?url";
+import bundledModel1InlineUrl from "../model/model_quant_1.tflite?inline";
+import bundledModel2InlineUrl from "../model/model_quant_2.tflite?inline";
 import processorModuleUrl from "./audio-worklet-processor.ts?worker&url";
 import {
   resolveBrowserCpuThreadCount,
-  resolveDefaultModel1Url,
-  resolveDefaultModel2Url,
   resolveThreadSetting,
 } from "./browser-runtime-options";
 import {
@@ -142,8 +142,8 @@ export async function createNoiseSuppressionAudioWorklet(
   const threads = resolveThreadSetting(options.threads);
   const numThreads = resolveBrowserCpuThreadCount(options.numThreads);
   const bypassUntilReady = options.bypassUntilReady ?? true;
-  const model1Url = options.model1Url ?? resolveDefaultModel1Url();
-  const model2Url = options.model2Url ?? resolveDefaultModel2Url();
+  const model1Url = options.model1Url ?? bundledModel1InlineUrl;
+  const model2Url = options.model2Url ?? bundledModel2InlineUrl;
   const liteRtWasmUrl = options.liteRtWasmUrl ?? bundledLiteRtWasmUrl;
 
   const assetPromises = [

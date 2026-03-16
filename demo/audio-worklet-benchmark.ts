@@ -9,6 +9,7 @@ interface BenchmarkCaseResult {
   label: string;
   initMs: number;
   frameSamples: number;
+  renderQuantumSamples: number;
   threads: boolean;
   numThreads: number;
   summary: NoiseSuppressionAudioWorkletBenchmarkCompleteMessage["summary"];
@@ -20,19 +21,15 @@ interface BenchmarkCaseError {
 }
 
 function formatBenchmarkCase(result: BenchmarkCaseResult): string {
-  const equivalent512MeanMs = result.summary.meanMs * (512 / result.frameSamples);
-  const equivalent512P95Ms = result.summary.p95Ms * (512 / result.frameSamples);
-
   return [
     result.label,
     `  init: ${result.initMs.toFixed(3)} ms`,
-    `  frame samples: ${result.frameSamples}`,
-    `  mean dtln_denoise: ${result.summary.meanMs.toFixed(3)} ms`,
-    `  p95 dtln_denoise:  ${result.summary.p95Ms.toFixed(3)} ms`,
-    `  min dtln_denoise:  ${result.summary.minMs.toFixed(3)} ms`,
-    `  max dtln_denoise:  ${result.summary.maxMs.toFixed(3)} ms`,
-    `  equivalent 512 mean: ${equivalent512MeanMs.toFixed(3)} ms`,
-    `  equivalent 512 p95:  ${equivalent512P95Ms.toFixed(3)} ms`,
+    `  render quantum: ${result.renderQuantumSamples} samples`,
+    `  denoise frame: ${result.frameSamples} samples`,
+    `  mean dtln_denoise(512): ${result.summary.meanMs.toFixed(3)} ms`,
+    `  p95 dtln_denoise(512):  ${result.summary.p95Ms.toFixed(3)} ms`,
+    `  min dtln_denoise(512):  ${result.summary.minMs.toFixed(3)} ms`,
+    `  max dtln_denoise(512):  ${result.summary.maxMs.toFixed(3)} ms`,
     `  threads: ${result.threads ? "enabled" : "disabled"} (${result.numThreads})`,
   ].join("\n");
 }
@@ -67,6 +64,7 @@ async function runBenchmarkCase(
       label,
       initMs,
       frameSamples: benchmark.frameSamples,
+      renderQuantumSamples: benchmark.renderQuantumSamples,
       threads: readyMessage.modelDetails.threads,
       numThreads: readyMessage.modelDetails.numThreads,
       summary: benchmark.summary,

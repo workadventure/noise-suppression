@@ -13,6 +13,8 @@ export default defineConfig(({ command }) => {
   const isBuild = command === "build";
 
   return {
+    assetsInclude: ["**/*.tflite", "**/*.tflite?inline"],
+    base: "./",
     define: {
       __NOISE_SUPPRESSION_LITERT_WASM_ROOT__: isBuild
         ? runtimeExpression("./vendor/litert/")

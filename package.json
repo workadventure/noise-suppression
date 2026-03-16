@@ -27,6 +27,7 @@
   "scripts": {
     "dev": "vite",
     "build": "npm run typecheck && vite build && tsc -p tsconfig.build.json",
+    "test:browser": "PLAYWRIGHT_BROWSERS_PATH=/tmp/pw-browsers vitest --config vitest.config.ts --browser --run",
     "typecheck": "tsc -p tsconfig.json",
     "preview": "vite preview"
   },
@@ -56,8 +57,12 @@
   },
   "devDependencies": {
     "@litertjs/core": "^2.0.0",
+    "@vitest/browser": "^4.1.0",
+    "@vitest/browser-playwright": "^4.1.0",
+    "playwright": "^1.58.2",
     "typescript": "^5.8.2",
     "vite": "^5.4.14",
-    "vite-plugin-static-copy": "^1.0.6"
+    "vite-plugin-static-copy": "^1.0.6",
+    "vitest": "^4.1.0"
   }
 }
