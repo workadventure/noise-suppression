@@ -14,7 +14,74 @@ interface BenchmarkState {
   warmupRemaining: number;
   benchmarkRemaining: number;
   timings: number[];
+  renderQuantumSamples: number | null;
 }
+
+class Float32RingBuffer {
+  private readonly storage: Float32Array;
+  private readIndex = 0;
+  private writeIndex = 0;
+  private availableSamples = 0;
+
+  constructor(size: number) {
+    this.storage = new Float32Array(size);
+  }
+
+  availableRead(): number {
+    return this.availableSamples;
+  }
+
+  availableWrite(): number {
+    return this.storage.length - this.availableSamples;
+  }
+
+  push(source: Float32Array): void {
+    if (source.length > this.availableWrite()) {
+      throw new Error("AudioWorklet ring buffer overflow.");
+    }
+
+    let remaining = source.length;
+    let sourceOffset = 0;
+
+    while (remaining > 0) {
+      const chunk = Math.min(remaining, this.storage.length - this.writeIndex);
+      this.storage.set(source.subarray(sourceOffset, sourceOffset + chunk), this.writeIndex);
+      this.writeIndex = (this.writeIndex + chunk) % this.storage.length;
+      this.availableSamples += chunk;
+      remaining -= chunk;
+      sourceOffset += chunk;
+    }
+  }
+
+  pullInto(target: Float32Array): boolean {
+    if (target.length > this.availableSamples) {
+      return false;
+    }
+
+    let remaining = target.length;
+    let targetOffset = 0;
+
+    while (remaining > 0) {
+      const chunk = Math.min(remaining, this.storage.length - this.readIndex);
+      target.set(this.storage.subarray(this.readIndex, this.readIndex + chunk), targetOffset);
+      this.readIndex = (this.readIndex + chunk) % this.storage.length;
+      this.availableSamples -= chunk;
+      remaining -= chunk;
+      targetOffset += chunk;
+    }
+
+    return true;
+  }
+
+  clear(): void {
+    this.readIndex = 0;
+    this.writeIndex = 0;
+    this.availableSamples = 0;
+  }
+}
+
+const DENOISE_FRAME_SAMPLES = 512;
+const RING_BUFFER_CAPACITY = 2048;
 
 function nowMs(): number {
   if (
@@ -58,6 +125,10 @@ class NoiseSuppressionProcessor extends AudioWorkletProcessor {
   private processedQuanta = 0;
   private processingStartedReported = false;
   private benchmarkState: BenchmarkState | null = null;
+  private readonly inputRing = new Float32RingBuffer(RING_BUFFER_CAPACITY);
+  private readonly outputRing = new Float32RingBuffer(RING_BUFFER_CAPACITY);
+  private readonly denoiseInput = new Float32Array(DENOISE_FRAME_SAMPLES);
+  private readonly denoiseOutput = new Float32Array(DENOISE_FRAME_SAMPLES);
 
   constructor(options: AudioWorkletNodeOptions) {
     super();
@@ -93,7 +164,8 @@ class NoiseSuppressionProcessor extends AudioWorkletProcessor {
 
     if (this.initFailed || this.denoiserModule === null || this.denoiserHandle === null) {
       if (this.bypassUntilReady) {
-        outputChannel.set(inputChannel);
+        outputChannel.fill(0);
+        outputChannel.set(inputChannel.subarray(0, outputChannel.length));
       } else {
         outputChannel.fill(0);
       }
@@ -102,29 +174,14 @@ class NoiseSuppressionProcessor extends AudioWorkletProcessor {
     }
 
     try {
-      const startMs = nowMs();
-      this.denoiserModule.dtln_denoise(
-        this.denoiserHandle,
-        inputChannel,
-        outputChannel
-      );
-      const elapsedMs = nowMs() - startMs;
       this.processedQuanta++;
-      this.recordBenchmarkTiming(elapsedMs, inputChannel.length);
-
-      if (!this.processingStartedReported) {
-        this.processingStartedReported = true;
-        const message: NoiseSuppressionAudioWorkletProcessingStartedMessage = {
-          type: "processing-started",
-          processedQuanta: this.processedQuanta,
-        };
-        this.port.postMessage(message);
-      }
+      this.processQuantum(inputChannel, outputChannel);
     } catch (error) {
       this.initFailed = true;
 
       if (this.bypassUntilReady) {
-        outputChannel.set(inputChannel);
+        outputChannel.fill(0);
+        outputChannel.set(inputChannel.subarray(0, outputChannel.length));
       } else {
         outputChannel.fill(0);
       }
@@ -176,6 +233,7 @@ class NoiseSuppressionProcessor extends AudioWorkletProcessor {
         warmupRemaining: message.warmupIterations,
         benchmarkRemaining: message.benchmarkIterations,
         timings: [],
+        renderQuantumSamples: null,
       };
     }
   }
@@ -187,6 +245,8 @@ class NoiseSuppressionProcessor extends AudioWorkletProcessor {
 
     this.denoiserModule = null;
     this.denoiserHandle = null;
+    this.inputRing.clear();
+    this.outputRing.clear();
   }
 
   private reportError(error: unknown): void {
@@ -207,10 +267,46 @@ class NoiseSuppressionProcessor extends AudioWorkletProcessor {
     this.port.postMessage(message);
   }
 
-  private recordBenchmarkTiming(elapsedMs: number, frameSamples: number): void {
+  private processQuantum(inputChannel: Float32Array, outputChannel: Float32Array): void {
+    this.inputRing.push(inputChannel);
+
+    while (this.inputRing.availableRead() >= DENOISE_FRAME_SAMPLES) {
+      if (!this.inputRing.pullInto(this.denoiseInput)) {
+        break;
+      }
+
+      const startMs = nowMs();
+      this.denoiserModule!.dtln_denoise(
+        this.denoiserHandle!,
+        this.denoiseInput,
+        this.denoiseOutput
+      );
+      const elapsedMs = nowMs() - startMs;
+
+      this.recordBenchmarkTiming(elapsedMs, outputChannel.length);
+      this.outputRing.push(this.denoiseOutput);
+
+      if (!this.processingStartedReported) {
+        this.processingStartedReported = true;
+        const message: NoiseSuppressionAudioWorkletProcessingStartedMessage = {
+          type: "processing-started",
+          processedQuanta: this.processedQuanta,
+        };
+        this.port.postMessage(message);
+      }
+    }
+
+    if (!this.outputRing.pullInto(outputChannel)) {
+      outputChannel.fill(0);
+    }
+  }
+
+  private recordBenchmarkTiming(elapsedMs: number, renderQuantumSamples: number): void {
     if (this.benchmarkState === null) {
       return;
     }
+
+    this.benchmarkState.renderQuantumSamples ??= renderQuantumSamples;
 
     if (this.benchmarkState.warmupRemaining > 0) {
       this.benchmarkState.warmupRemaining--;
@@ -230,7 +326,8 @@ class NoiseSuppressionProcessor extends AudioWorkletProcessor {
 
     const message: NoiseSuppressionAudioWorkletBenchmarkCompleteMessage = {
       type: "benchmark-complete",
-      frameSamples,
+      frameSamples: DENOISE_FRAME_SAMPLES,
+      renderQuantumSamples: this.benchmarkState.renderQuantumSamples ?? 0,
       summary: summarizeTimings(this.benchmarkState.timings),
     };
 
