@@ -27,7 +27,7 @@
   "scripts": {
     "dev": "vite",
     "build": "npm run typecheck && vite build && tsc -p tsconfig.build.json",
-    "test:browser": "PLAYWRIGHT_BROWSERS_PATH=/tmp/pw-browsers vitest --config vitest.config.ts --browser --run",
+    "test:browser": "vitest --config vitest.config.ts --browser --run",
     "typecheck": "tsc -p tsconfig.json",
     "preview": "vite preview"
   },

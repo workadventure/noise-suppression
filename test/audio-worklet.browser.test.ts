@@ -36,7 +36,6 @@ describe("audio worklet runtime", () => {
 
     try {
       const worklet = await createNoiseSuppressionAudioWorklet(context, {
-        threads: false,
         numThreads: 1,
       });
 

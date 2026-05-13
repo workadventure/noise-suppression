@@ -1,6 +1,3 @@
-import model1Url from "../model/model_quant_1.tflite?url";
-import model2Url from "../model/model_quant_2.tflite?url";
-import liteRtWasmUrl from "../forks/litertjs-core/wasm/litert_wasm_internal.wasm?url";
 import {
   createNoiseSuppressionAudioWorklet,
   isNoiseSuppressionProcessingStartedMessage,
@@ -25,7 +22,7 @@ app.innerHTML = `
       This page runs three AudioWorklet probes: a bare processor, a processor
       that imports <code>@litertjs/core</code>, a processor that imports
       <code>fft.js</code>, and the public AudioWorklet entrypoint that loads the
-      full denoiser from bundled bytes on the main thread.
+      full denoiser from bytes bundled inside the processor module.
     </p>
     <p class="status" id="status">Waiting to start validation...</p>
     <p>
@@ -75,9 +72,8 @@ function metric(label: string, value: string): string {
 
 environmentElement.innerHTML = [
   metric("Cross-origin isolated", globalThis.crossOriginIsolated ? "yes" : "no"),
-  metric("Model 1 URL", model1Url),
-  metric("Model 2 URL", model2Url),
-  metric("LiteRT Wasm asset", liteRtWasmUrl),
+  metric("Model assets", "bundled in AudioWorklet"),
+  metric("LiteRT Wasm asset", "bundled in AudioWorklet"),
 ].join("");
 
 async function startValidation(): Promise<void> {
@@ -182,9 +178,6 @@ async function runPublicWorkletProbe(
   appendMessage("[full-init] creating public AudioWorklet handle.");
 
   const worklet = await createNoiseSuppressionAudioWorklet(context, {
-    liteRtWasmUrl,
-    model1Url,
-    model2Url,
     threads: false,
     numThreads: 1,
   });

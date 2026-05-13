@@ -1,4 +1,4 @@
-import { WasmModule } from '@litertjs/wasm-utils';
+import { WasmModule, FileLocator, WasmModuleFactory } from '@litertjs/wasm-utils';
 
 /**
  * Copyright 2025 Google LLC
@@ -58,10 +58,26 @@ declare interface LiteRtEnvironment extends Deletable {
     [liteRtEnvironmentBrand]: void;
 }
 /**
+ * Options for configuring the WebGPU delegate.
+ */
+declare interface LiteRtGpuOptions {
+    precision?: 'fp16' | 'fp32';
+}
+/**
+ * Options for configuring the WebNN delegate.
+ */
+declare interface LiteRtWebNNOptions {
+    devicePreference?: 'cpu' | 'gpu' | 'npu';
+    powerPreference?: 'default' | 'high-performance' | 'low-power';
+    precision?: 'fp32' | 'fp16';
+}
+/**
  * Options for loading and compiling a LiteRt model.
  */
 declare interface LiteRtCompileOptions {
-    accelerator?: 'webgpu' | 'wasm';
+    accelerator?: 'wasm' | 'webgpu' | 'webnn' | Array<'wasm' | 'webgpu' | 'webnn'>;
+    gpuOptions?: LiteRtGpuOptions;
+    webNNOptions?: LiteRtWebNNOptions;
 }
 declare const liteRtModelBrand: unique symbol;
 /**
@@ -128,7 +144,8 @@ declare interface LiteRtCompiledModel extends Deletable {
     [liteRtCompiledModelBrand]: void;
     getInputBufferRequirements(signatureIndex: number, inputIndex: number): LiteRtTensorBufferRequirements;
     getOutputBufferRequirements(signatureIndex: number, outputIndex: number): LiteRtTensorBufferRequirements;
-    run(signatureIndex: number, inputTensors: LiteRtTensorBuffer[]): LiteRtTensorBuffer[];
+    run(signatureIndex: number, inputTensors: LiteRtTensorBuffer[]): LiteRtTensorBuffer[] | Promise<LiteRtTensorBuffer[]>;
+    isFullyAccelerated(): boolean;
 }
 /**
  * ElementType enum representing the types of elements in tensors.
@@ -242,7 +259,7 @@ declare interface LiteRtWasm extends WasmModule {
     setupLogging(): void;
     LiteRtEnvironment: LiteRtEnvironmentConstructor;
     loadModel(environment: LiteRtEnvironment, modelDataPtr: number, modelSize: number): LiteRtModel;
-    compileModel(environment: LiteRtEnvironment, model: LiteRtModel, options?: LiteRtCompileOptions): LiteRtCompiledModel;
+    compileModel(environment: LiteRtEnvironment, model: LiteRtModel, options?: LiteRtCompileOptions): LiteRtCompiledModel | Promise<LiteRtCompiledModel>;
     wgpuBufferRelease(bufferPtr: number): void;
     LiteRtTensorBuffer: LiteRtTensorBufferConstructor;
     LiteRtTensorBufferType: LiteRtTensorBufferTypeEnum;
@@ -420,6 +437,7 @@ declare global {
 }
 
 /**
+ * g3-format-prettier
  * Copyright 2025 Google LLC
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -560,6 +578,8 @@ interface CpuOptions {
 interface CompileOptions extends LiteRtCompileOptions {
     environment?: Environment;
     cpuOptions?: CpuOptions;
+    gpuOptions?: LiteRtGpuOptions;
+    webNNOptions?: LiteRtWebNNOptions;
 }
 
 /**
@@ -666,6 +686,7 @@ declare class CompiledModel implements Deletable, SignatureRunner {
     private parseRunInputs;
     get deleted(): boolean;
     private ensureNotDeleted;
+    get isFullyAccelerated(): boolean;
     delete(): void;
 }
 
@@ -796,16 +817,50 @@ declare function getGlobalLiteRtPromise(): Promise<LiteRt> | undefined;
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+/**
+ * Type for a path to a resource.
+ */
+type UrlPath = string;
 
+/**
+ * Copyright 2025 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+type WasmModuleSource = UrlPath | WasmModuleFactory;
+type WasmLoaderType = 'script' | 'module';
 /**
  * Options for loading LiteRT's Wasm module.
  *
  * @property threads Whether to load the threaded version of the Wasm module.
  *     Defaults to false. Unused when specifying a .js file directly instead of
  *     a directory containing the Wasm files.
+ * @property jspi Whether to load the JSPI version of the Wasm module. Defaults
+ *     to false. Unused when specifying a .js file directly instead of a
+ *     directory containing the Wasm files.
+ * @property wasmLoaderType Whether to load Emscripten's generated glue as a
+ *     classic script or as an ES module. Defaults to 'script'. When set to
+ *     'module' and a directory path is provided, LiteRT.js selects the
+ *     corresponding `.mjs` file.
+ * @property fileLocator File locator overrides passed to Emscripten's module
+ *     factory.
  **/
 interface LoadOptions {
     threads?: boolean;
+    jspi?: boolean;
+    wasmLoaderType?: WasmLoaderType;
+    fileLocator?: FileLocator;
 }
 
 /**
@@ -824,25 +879,17 @@ interface LoadOptions {
  * limitations under the License.
  */
 
-type UrlString = string;
 /**
  * Options for loading LiteRT.
  *
  * @property threads Whether to load the threaded version of the Wasm module.
  *     Defaults to false. Unused when specifying a .js file directly instead of
  *     a directory containing the Wasm files.
+ * @property jspi Whether to load the JSPI version of the Wasm module. Defaults
+ *     to false. Unused when specifying a .js file directly instead of a
+ *     directory containing the Wasm files.
  **/
-interface LoadLiteRtOptions extends LoadOptions {
-}
-/**
- * Options for loading LiteRT from already-bundled assets.
- *
- * This path is intended for constrained environments such as
- * `AudioWorkletGlobalScope`, where the stock script-loader path is not
- * available.
- */
-interface LoadLiteRtFromBundledAssetsOptions extends LoadOptions {
-}
+type LoadLiteRtOptions = LoadOptions;
 /**
  * Load LiteRT.js Wasm files from the given URL. This needs to be called before
  * calling any other LiteRT functions.
@@ -850,23 +897,18 @@ interface LoadLiteRtFromBundledAssetsOptions extends LoadOptions {
  * The URL can be:
  *
  * - A directory containing the LiteRT Wasm files (e.g. `.../wasm/`), or
- * - The LiteRT Wasm's js file (e.g. `.../litert_wasm_internal.js`)
+ * - The LiteRT Wasm's js/mjs file (e.g. `.../litert_wasm_internal.js`), or
+ * - An Emscripten ES module factory imported from a generated `.mjs` file.
  *
  * If the URL is to a directory, LiteRT.js will detect what WASM features are
  * available in the browser and load the compatible WASM file. If the URL is
  * to a file, it will be loaded as is.
  *
  * @param path The path to the directory containing the LiteRT Wasm files, or
- *     the full URL of the LiteRT Wasm .js file.
+ *     the full URL of the LiteRT Wasm .js/.mjs file. Emscripten ES module
+ *     factories can also be passed directly.
  */
-declare function loadLiteRt(path: UrlString, options?: LoadLiteRtOptions): Promise<LiteRt>;
-/**
- * Load LiteRT.js from already-bundled loader source and wasm bytes.
- *
- * This bypasses the stock script-injection bootstrap and is intended for
- * worklet-style environments.
- */
-declare function loadLiteRtFromBundledAssets(loaderSource: string, wasmBinary: Uint8Array, options?: LoadLiteRtFromBundledAssetsOptions): Promise<LiteRt>;
+declare function loadLiteRt(path: WasmModuleSource, options?: LoadLiteRtOptions): Promise<LiteRt>;
 /**
  * Unload the LiteRt WASM module.
  *
@@ -876,4 +918,40 @@ declare function loadLiteRtFromBundledAssets(loaderSource: string, wasmBinary: U
  */
 declare function unloadLiteRt(): void;
 
-export { type Accelerator, type CompileOptions, CompiledModel, type CopyOptions, type DType, type Dimensions, Environment, type EnvironmentOptions, LiteRt, LiteRtNotLoadedError, type LoadLiteRtFromBundledAssetsOptions, type LoadLiteRtOptions, type SignatureRunner, Tensor, TensorBufferType, type TensorCopyFn, type TensorDetails, type TensorType, type TypedArray, getDefaultEnvironment, getGlobalLiteRt, getGlobalLiteRtPromise, getWebGpuDevice, isWebGPUSupported, loadAndCompile, loadLiteRt, loadLiteRtFromBundledAssets, setWebGpuDevice, unloadLiteRt };
+/**
+ * Copyright 2025 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+interface SupportStatus {
+    supported: boolean;
+    error?: Error;
+}
+declare interface WasmFeatureValues {
+    relaxedSimd: Promise<SupportStatus> | undefined;
+    threads: Promise<SupportStatus> | undefined;
+    jspi: Promise<SupportStatus> | undefined;
+    webnn: Promise<SupportStatus> | undefined;
+}
+declare const WASM_FEATURE_VALUES: WasmFeatureValues;
+declare const WASM_FEATURE_CHECKS: Record<keyof typeof WASM_FEATURE_VALUES, () => Promise<SupportStatus>>;
+/**
+ * Check if a given WASM feature is supported.
+ *
+ * @param feature The feature to check.
+ * @return A promise that resolves to true if the feature is supported,
+ *     false otherwise.
+ */
+declare function supportsFeature(feature: keyof typeof WASM_FEATURE_CHECKS): Promise<boolean>;
+
+export { type Accelerator, type CompileOptions, CompiledModel, type CopyOptions, type DType, type Dimensions, Environment, type EnvironmentOptions, LiteRt, LiteRtNotLoadedError, type LoadLiteRtOptions, type SignatureRunner, Tensor, TensorBufferType, type TensorCopyFn, type TensorDetails, type TensorType, type TypedArray, getDefaultEnvironment, getGlobalLiteRt, getGlobalLiteRtPromise, getWebGpuDevice, isWebGPUSupported, loadAndCompile, loadLiteRt, setWebGpuDevice, supportsFeature, unloadLiteRt };

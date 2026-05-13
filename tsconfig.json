@@ -15,7 +15,11 @@
     "esModuleInterop": true,
     "isolatedModules": true,
     "skipLibCheck": true,
-    "noEmit": true
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@litertjs/wasm-utils": ["./forks/litertjs-wasm-utils/index.d.ts"]
+    }
   },
   "include": [
     "src/**/*.ts",
