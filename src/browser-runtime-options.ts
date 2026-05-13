@@ -1,6 +1,8 @@
-const DEFAULT_LITERT_WASM_ROOT = __NOISE_SUPPRESSION_LITERT_WASM_ROOT__;
-const DEFAULT_MODEL1_URL = __NOISE_SUPPRESSION_MODEL1_URL__;
-const DEFAULT_MODEL2_URL = __NOISE_SUPPRESSION_MODEL2_URL__;
+import {
+  defaultLiteRtWasmRoot,
+  defaultModel1Url,
+  defaultModel2Url,
+} from "virtual:noise-suppression-default-assets";
 
 export function resolveAssetUrl(assetPath: string): string {
   if (/^(https?:)?\/\//.test(assetPath) || assetPath.startsWith("/")) {
@@ -37,13 +39,13 @@ export function resolveBrowserCpuThreadCount(requested: number | undefined): num
 }
 
 export function resolveDefaultLiteRtWasmRoot(): string {
-  return resolveAssetUrl(DEFAULT_LITERT_WASM_ROOT);
+  return defaultLiteRtWasmRoot;
 }
 
 export function resolveDefaultModel1Url(): string {
-  return resolveAssetUrl(DEFAULT_MODEL1_URL);
+  return defaultModel1Url;
 }
 
 export function resolveDefaultModel2Url(): string {
-  return resolveAssetUrl(DEFAULT_MODEL2_URL);
+  return defaultModel2Url;
 }

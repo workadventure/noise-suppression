@@ -1,6 +1,6 @@
 # ADR 0004: Implement AudioWorklet LiteRT Fork and Benchmark
 
-- Status: Accepted
+- Status: Superseded by [ADR 0007](./0007-use-litert-esm-fork-for-audioworklet.md)
 - Date: 2026-03-13
 
 ## Context

@@ -1,6 +1,6 @@
+import "./audio-worklet-global-scope-shim";
 import { createNoiseSuppressionRuntime, type NoiseSuppressionModule } from "./runtime";
 import {
-  NOISE_SUPPRESSION_AUDIO_WORKLET_PROCESSOR_NAME,
   type NoiseSuppressionAudioWorkletBenchmarkCompleteMessage,
   type NoiseSuppressionAudioWorkletErrorMessage,
   type NoiseSuppressionAudioWorkletInboundMessage,
@@ -8,7 +8,13 @@ import {
   type NoiseSuppressionAudioWorkletProcessingStartedMessage,
   type NoiseSuppressionAudioWorkletReadyMessage,
 } from "./audio-worklet-shared";
-import liteRtLoaderSource from "../forks/litertjs-core/wasm/litert_wasm_internal.js?raw";
+import createLiteRtWasm from "../forks/litertjs-core/wasm/litert_wasm_internal.mjs";
+import liteRtWasmBinary from "../forks/litertjs-core/wasm/litert_wasm_internal.wasm?bytes";
+import model1Data from "../model/model_quant_1.tflite?bytes";
+import model2Data from "../model/model_quant_2.tflite?bytes";
+
+const NOISE_SUPPRESSION_AUDIO_WORKLET_PROCESSOR_NAME =
+  "workadventure-noise-suppression";
 
 interface BenchmarkState {
   warmupRemaining: number;
@@ -198,10 +204,10 @@ class NoiseSuppressionProcessor extends AudioWorkletProcessor {
     try {
       const module = await createNoiseSuppressionRuntime({
         liteRtWasmRoot: "bundled://litert",
-        liteRtLoaderSource,
-        liteRtWasmBinary: options.liteRtWasmBinary,
-        model1Data: options.model1Data,
-        model2Data: options.model2Data,
+        liteRtWasmModuleFactory: createLiteRtWasm,
+        liteRtWasmBinary,
+        model1Data,
+        model2Data,
         threads: options.threads,
         numThreads: options.numThreads,
       });

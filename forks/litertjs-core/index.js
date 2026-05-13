@@ -138,10 +138,7 @@ var TensorBufferTypeToAccelerator = {
 // src/environment.ts
 var DESIRED_WEBGPU_FEATURES = [
   "shader-f16",
-  "subgroups",
-  // In origin trial
-  "subgroups-f16"
-  // In origin trial
+  "subgroups"
 ];
 var Environment = class _Environment {
   constructor(options) {
@@ -223,12 +220,14 @@ function parseData(remainingArgs) {
   const liteRtWasm = getGlobalLiteRt().liteRtWasm;
   if (data instanceof liteRtWasm.LiteRtTensorBuffer) {
     return { liteRtTensorBuffer: data };
-  } else if (typeof GPUBuffer !== "undefined" && data instanceof GPUBuffer) {
-    return { gpuBuffer: data };
   } else if (ArrayBuffer.isView(data)) {
     return { typedArray: data };
+  } else if (data instanceof GPUBuffer) {
+    return { gpuBuffer: data };
   } else {
-    throw new Error(`Unknown type (${data?.constructor.name ?? data}) provided to create a Tensor`);
+    throw new Error(
+      `Unknown type (${data?.constructor.name ?? data}) provided to create a Tensor`
+    );
   }
 }
 function parseShape(remainingArgs) {
@@ -329,7 +328,11 @@ var Tensor = class _Tensor {
         onDelete2?.();
       };
     } else if (typedArray) {
-      this.liteRtTensorBuffer = typedArrayToLiteRtTensorBuffer(typedArray, shape, environment);
+      this.liteRtTensorBuffer = typedArrayToLiteRtTensorBuffer(
+        typedArray,
+        shape,
+        environment
+      );
     } else {
       throw new Error("No data provided to create a Tensor.");
     }
@@ -373,7 +376,9 @@ var Tensor = class _Tensor {
     const elementType = rankedTensorType.elementType();
     const byteWidth = liteRtWasm.liteRtGetByteWidth(elementType);
     rankedTensorType.delete();
-    const typedArrayConstructor = getDataType(elementType.value).typedArrayConstructor;
+    const typedArrayConstructor = getDataType(
+      elementType.value
+    ).typedArrayConstructor;
     if (typedArrayConstructor.BYTES_PER_ELEMENT !== byteWidth) {
       throw new Error(
         `Byte width ${byteWidth} of the tensor's element type ${ElementTypeName[elementType.value]} does not match the expected byte width ${typedArrayConstructor.BYTES_PER_ELEMENT} of the ${typedArrayConstructor.name}.`
@@ -439,7 +444,9 @@ var Tensor = class _Tensor {
     const sourceBufferType = this.getBufferType();
     const copyFunctions = _Tensor.copyFunctions.get(sourceBufferType);
     if (!copyFunctions) {
-      throw new Error(`TensorBufferType ${TensorBufferTypeName[sourceBufferType] ?? sourceBufferType} does not support copying or moving`);
+      throw new Error(
+        `TensorBufferType ${TensorBufferTypeName[sourceBufferType] ?? sourceBufferType} does not support copying or moving`
+      );
     }
     const destinationBufferType = typeof destination === "string" ? AcceleratorDefaultTensorBufferType[destination] : destination;
     if (destinationBufferType == null) {
@@ -449,8 +456,14 @@ var Tensor = class _Tensor {
     }
     const copyFunctionSet = copyFunctions.get(destinationBufferType);
     if (!copyFunctionSet) {
-      const supportedDestinations = [...copyFunctions].map(([key]) => TensorBufferTypeName[key] ?? key);
-      throw new Error(`TensorBufferType ${TensorBufferTypeName[sourceBufferType]} does not support copying or moving to ${TensorBufferTypeName[destinationBufferType]}. It supports the following TensorBufferTypes: [${supportedDestinations.join(", ")}].`);
+      const supportedDestinations = [...copyFunctions].map(
+        ([key]) => TensorBufferTypeName[key] ?? key
+      );
+      throw new Error(
+        `TensorBufferType ${TensorBufferTypeName[sourceBufferType]} does not support copying or moving to ${TensorBufferTypeName[destinationBufferType]}. It supports the following TensorBufferTypes: [${supportedDestinations.join(
+          ", "
+        )}].`
+      );
     }
     return [copyFunctionSet, destinationBufferType];
   }
@@ -463,7 +476,9 @@ var Tensor = class _Tensor {
   async copyTo(destination, options) {
     const [copyFunctionSet, destinationBufferType] = this.getCopyFunctionSet(destination);
     if (!copyFunctionSet.copyTo) {
-      throw new Error(`Copying to ${TensorBufferTypeName[destinationBufferType]} is not supported by this tensor.`);
+      throw new Error(
+        `Copying to ${TensorBufferTypeName[destinationBufferType]} is not supported by this tensor.`
+      );
     }
     return copyFunctionSet.copyTo(this, options);
   }
@@ -476,7 +491,9 @@ var Tensor = class _Tensor {
   async moveTo(destination, options) {
     const [copyFunctionSet, destinationBufferType] = this.getCopyFunctionSet(destination);
     if (!copyFunctionSet.moveTo) {
-      throw new Error(`Moving to ${TensorBufferTypeName[destinationBufferType]} is not supported by this tensor.`);
+      throw new Error(
+        `Moving to ${TensorBufferTypeName[destinationBufferType]} is not supported by this tensor.`
+      );
     }
     return copyFunctionSet.moveTo(this, options);
   }
@@ -486,7 +503,9 @@ var Tensor = class _Tensor {
   get accelerator() {
     const accelerator = TensorBufferTypeToAccelerator[this.bufferType];
     if (accelerator === void 0) {
-      throw new Error(`TensorBufferType ${TensorBufferTypeName[this.bufferType]} has an unknown accelerator type.`);
+      throw new Error(
+        `TensorBufferType ${TensorBufferTypeName[this.bufferType]} has an unknown accelerator type.`
+      );
     }
     return accelerator;
   }
@@ -553,7 +572,10 @@ function typedArrayToLiteRtTensorBuffer(data, shape, environment) {
       `Number of elements ${data.length} of the provided TypedArray does not match the expected number of elements ${expectedNumElements}.`
     );
   }
-  const rankedTensorType = liteRtWasm.LiteRtRankedTensorType.create({ value: elementType }, layout);
+  const rankedTensorType = liteRtWasm.LiteRtRankedTensorType.create(
+    { value: elementType },
+    layout
+  );
   layout.delete();
   const arrayType = data.constructor;
   const bufferSize = arrayType.BYTES_PER_ELEMENT * data.length;
@@ -571,9 +593,15 @@ function typedArrayToLiteRtTensorBuffer(data, shape, environment) {
     bufferSize
   );
   rankedTensorType.delete();
-  const dataPtr = liteRtTensorBuffer.lock(liteRtWasm.LiteRtTensorBufferLockMode.WRITE);
+  const dataPtr = liteRtTensorBuffer.lock(
+    liteRtWasm.LiteRtTensorBufferLockMode.WRITE
+  );
   try {
-    const uint8Data = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    const uint8Data = new Uint8Array(
+      data.buffer,
+      data.byteOffset,
+      data.byteLength
+    );
     liteRtWasm.HEAPU8.set(uint8Data, dataPtr);
   } finally {
     liteRtTensorBuffer.unlock();
@@ -639,7 +667,7 @@ var CompiledModelSignatureRunner = class {
     const { inputsOnAccelerator, cleanup } = await this.ensureInputsOnAccelerator(inputArray);
     let outputArray;
     try {
-      outputArray = this.runWithArray(inputsOnAccelerator);
+      outputArray = await this.runWithArray(inputsOnAccelerator);
     } finally {
       cleanup();
     }
@@ -726,7 +754,7 @@ var CompiledModelSignatureRunner = class {
       }
     };
   }
-  runWithArray(input) {
+  async runWithArray(input) {
     for (let i = 0; i < input.length; i++) {
       const inputTensor = input[i];
       const expectedRankedTensorType = this.liteRtModel.getInputTensorType(this.signatureIndex, i);
@@ -742,7 +770,7 @@ var CompiledModelSignatureRunner = class {
       expectedRankedTensorType.delete();
       inputRequirements.delete();
     }
-    const outputTensorBuffers = this.liteRtCompiledModel.run(
+    const outputTensorBuffers = await this.liteRtCompiledModel.run(
       this.signatureIndex,
       input.map((tensor) => tensor.liteRtTensorBuffer)
     );
@@ -857,6 +885,10 @@ var CompiledModel = class {
     if (this.deleted) {
       throw new Error("CompiledModel is deleted and cannot be used.");
     }
+  }
+  get isFullyAccelerated() {
+    this.ensureNotDeleted();
+    return this.liteRtCompiledModel.isFullyAccelerated();
   }
   delete() {
     if (this.deletedInternal) {
@@ -978,10 +1010,7 @@ var LiteRt = class {
    */
   async loadAndCompile(model, compileOptions = {}) {
     let modelData;
-    if (
-      typeof model === "string" ||
-      (typeof URL !== "undefined" && model instanceof URL)
-    ) {
+    if (typeof model === "string" || model instanceof URL) {
       modelData = await urlToUint8Array(model);
     } else if (model instanceof Uint8Array) {
       modelData = model;
@@ -992,7 +1021,8 @@ var LiteRt = class {
     }
     const environment = compileOptions.environment ?? this.getDefaultEnvironment();
     const accelerator = compileOptions.accelerator ?? (environment.webGpuDevice ? "webgpu" : "wasm");
-    if (accelerator === "webgpu" && !environment.webGpuDevice) {
+    const acceleratorIncludesWebGpu = Array.isArray(accelerator) ? accelerator.includes("webgpu") : accelerator === "webgpu";
+    if (acceleratorIncludesWebGpu && !environment.webGpuDevice) {
       throw new Error(
         "WebGPU was requested but no WebGPU device is set in the environment."
       );
@@ -1001,7 +1031,9 @@ var LiteRt = class {
     const filledCompileOptions = {
       environment,
       accelerator,
-      cpuOptions
+      cpuOptions,
+      gpuOptions: compileOptions.gpuOptions ?? {},
+      webNNOptions: compileOptions.webNNOptions ?? {}
     };
     const ptr = this.liteRtWasm._malloc(modelData.byteLength);
     this.liteRtWasm.HEAPU8.set(modelData, ptr);
@@ -1010,7 +1042,7 @@ var LiteRt = class {
       ptr,
       modelData.byteLength
     );
-    const wasmCompiledModel = this.liteRtWasm.compileModel(
+    const wasmCompiledModel = await this.liteRtWasm.compileModel(
       filledCompileOptions.environment.liteRtEnvironment,
       wasmModel,
       filledCompileOptions
@@ -1037,7 +1069,9 @@ var LiteRt = class {
 };
 
 // src/load.ts
-import { createWasmLib } from "@litertjs/wasm-utils";
+import {
+  createWasmLib
+} from "@litertjs/wasm-utils";
 
 // src/url_path_utils.ts
 function pathToString(path) {
@@ -1131,8 +1165,16 @@ var WASM_THREADS_CHECK = new Uint8Array([
 ]);
 var WASM_FEATURE_VALUES = {
   "relaxedSimd": void 0,
-  "threads": void 0
+  "threads": void 0,
+  "jspi": void 0,
+  "webnn": void 0
 };
+function isJspiSupported() {
+  return "Suspending" in WebAssembly;
+}
+function isWebNnSupported() {
+  return typeof navigator !== "undefined" && !!navigator.ml;
+}
 async function tryWasm(wasm) {
   try {
     await WebAssembly.instantiate(wasm);
@@ -1160,6 +1202,26 @@ var WASM_FEATURE_CHECKS = {
       }
     }
     return WASM_FEATURE_VALUES.threads;
+  },
+  "jspi": () => {
+    if (WASM_FEATURE_VALUES.jspi === void 0) {
+      const supported = isJspiSupported();
+      WASM_FEATURE_VALUES.jspi = Promise.resolve({
+        supported,
+        error: supported ? void 0 : new Error("JSPI is not supported")
+      });
+    }
+    return WASM_FEATURE_VALUES.jspi;
+  },
+  "webnn": () => {
+    if (WASM_FEATURE_VALUES.webnn === void 0) {
+      const supported = isWebNnSupported();
+      WASM_FEATURE_VALUES.webnn = Promise.resolve({
+        supported,
+        error: supported ? void 0 : new Error("WebNN is not supported")
+      });
+    }
+    return WASM_FEATURE_VALUES.webnn;
   }
 };
 async function supportsFeature(feature) {
@@ -1184,11 +1246,63 @@ async function throwIfFeatureNotSupported(feature) {
 var WASM_JS_FILE_NAME = "litert_wasm_internal.js";
 var WASM_JS_COMPAT_FILE_NAME = "litert_wasm_compat_internal.js";
 var WASM_JS_THREADED_FILE_NAME = "litert_wasm_threaded_internal.js";
-async function load(path, options) {
-  const pathString = pathToString(path);
-  const isFullFilePath = pathString.endsWith(".wasm") || pathString.endsWith(".js");
+var WASM_JS_JSPI_FILE_NAME = "litert_wasm_jspi_internal.js";
+var WASM_MJS_FILE_NAME = "litert_wasm_internal.mjs";
+var WASM_MJS_COMPAT_FILE_NAME = "litert_wasm_compat_internal.mjs";
+var WASM_MJS_THREADED_FILE_NAME = "litert_wasm_threaded_internal.mjs";
+var WASM_MJS_JSPI_FILE_NAME = "litert_wasm_jspi_internal.mjs";
+async function load(source, options) {
+  if (typeof source === "function") {
+    await validateLoadOptions(
+      options,
+      /* isFullFilePath= */
+      true,
+      "the provided Wasm module factory"
+    );
+    return createWasmLib(LiteRt, {
+      fileLocator: options?.fileLocator,
+      moduleFactory: source
+    });
+  }
+  const pathString = pathToString(source);
+  const isModule = options?.wasmLoaderType === "module" || pathString.endsWith(".mjs");
+  const isFullFilePath = pathString.endsWith(".wasm") || pathString.endsWith(".js") || pathString.endsWith(".mjs");
+  const relaxedSimd = await validateLoadOptions(options, isFullFilePath, pathString);
+  let fileName = isModule ? WASM_MJS_COMPAT_FILE_NAME : WASM_JS_COMPAT_FILE_NAME;
+  if (relaxedSimd) {
+    if (options?.threads) {
+      fileName = isModule ? WASM_MJS_THREADED_FILE_NAME : WASM_JS_THREADED_FILE_NAME;
+    } else if (options?.jspi) {
+      fileName = isModule ? WASM_MJS_JSPI_FILE_NAME : WASM_JS_JSPI_FILE_NAME;
+    } else {
+      fileName = isModule ? WASM_MJS_FILE_NAME : WASM_JS_FILE_NAME;
+    }
+  }
+  let jsFilePath = source;
+  if (pathString.endsWith(".wasm")) {
+    throw new Error(
+      "Please load the `.js` file corresponding to the `.wasm` file, or load the directory containing it."
+    );
+  } else if (!pathString.endsWith(".js") && !pathString.endsWith(".mjs")) {
+    jsFilePath = appendPathSegment(source, fileName);
+  }
+  if (isModule) {
+    const wasmModuleFactory = await importWasmModuleFactory(jsFilePath);
+    return createWasmLib(LiteRt, {
+      fileLocator: options?.fileLocator,
+      moduleFactory: wasmModuleFactory
+    });
+  }
+  return createWasmLib(LiteRt, jsFilePath, null, null, options?.fileLocator);
+}
+async function validateLoadOptions(options, isFullFilePath, pathString) {
   const relaxedSimd = await supportsFeature("relaxedSimd");
   if (options?.threads) {
+    if (options?.jspi) {
+      throw new Error(
+        "The `threads` and `jspi` options are mutually exclusive."
+      );
+    }
     if (isFullFilePath) {
       console.warn(
         `The \`threads\` option was specified, but the wasm path ${pathString} is a full file path. Whether threads are available or not will depend on the loaded file. To allow LiteRT.js to load the threaded wasm file, use a directory path instead of a full file path.`
@@ -1201,23 +1315,47 @@ async function load(path, options) {
     }
     await throwIfFeatureNotSupported("threads");
   }
-  let fileName = WASM_JS_COMPAT_FILE_NAME;
-  if (relaxedSimd) {
-    if (options?.threads) {
-      fileName = WASM_JS_THREADED_FILE_NAME;
-    } else {
-      fileName = WASM_JS_FILE_NAME;
+  if (options?.jspi) {
+    if (isFullFilePath) {
+      console.warn(
+        `The \`jspi\` option was specified, but the wasm path ${pathString} is a full file path. Whether JSPI is available or not will depend on the loaded file. To allow LiteRT.js to load the JSPI wasm file, use a directory path instead of a full file path.`
+      );
     }
+    await throwIfFeatureNotSupported("jspi");
   }
-  let jsFilePath = path;
-  if (pathString.endsWith(".wasm")) {
+  return relaxedSimd;
+}
+async function importWasmModuleFactory(jsFilePath) {
+  const moduleUrl = resolveModuleImportUrl(jsFilePath);
+  const wasmModule = await import(
+    /* @vite-ignore */
+    moduleUrl
+  );
+  if (typeof wasmModule.default !== "function") {
     throw new Error(
-      "Please load the `.js` file corresponding to the `.wasm` file, or load the directory containing it."
+      `LiteRT Wasm ES module ${moduleUrl} must have a default export module factory.`
     );
-  } else if (!pathString.endsWith(".js")) {
-    jsFilePath = appendPathSegment(path, fileName);
   }
-  return createWasmLib(LiteRt, jsFilePath);
+  return wasmModule.default;
+}
+function resolveModuleImportUrl(jsFilePath) {
+  const pathString = pathToString(jsFilePath);
+  const baseUrl = getResourceBaseUrl();
+  if (!baseUrl) return pathString;
+  try {
+    return new URL(pathString, baseUrl).href;
+  } catch {
+    return pathString;
+  }
+}
+function getResourceBaseUrl() {
+  if (typeof document !== "undefined") {
+    return document.baseURI;
+  }
+  if (typeof location !== "undefined") {
+    return location.href;
+  }
+  return void 0;
 }
 
 // src/load_litert.ts
@@ -1232,55 +1370,6 @@ function loadLiteRt(path, options) {
     );
     return liteRt;
   }).catch((error) => {
-    setGlobalLiteRtPromise(void 0);
-    throw error;
-  }));
-  return getGlobalLiteRtPromise();
-}
-function createModuleFactoryFromSource(loaderSource) {
-  const textDecoderCtor = globalThis.TextDecoder ?? class TextDecoder {
-    decode(input) {
-      const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
-      let encoded = "";
-      for (const byte of bytes) {
-        encoded += `%${byte.toString(16).padStart(2, "0")}`;
-      }
-      return decodeURIComponent(encoded);
-    }
-  };
-  const moduleFactory = new Function(
-    "TextDecoder",
-    `${loaderSource}\nreturn typeof ModuleFactory === "function" ? ModuleFactory : undefined;`
-  )(textDecoderCtor);
-  if (typeof moduleFactory !== "function") {
-    throw new Error("Failed to evaluate bundled LiteRT loader source.");
-  }
-  return moduleFactory;
-}
-function loadLiteRtFromBundledAssets(loaderSource, wasmBinary, options) {
-  if (hasGlobalLiteRtPromise()) {
-    throw new Error("LiteRT is already loading / loaded.");
-  }
-  if (options?.threads) {
-    throw new Error(
-      "Threaded bundled LiteRT loading is not supported yet in the worklet fork."
-    );
-  }
-  setGlobalLiteRtPromise((async () => {
-    const moduleFactory = createModuleFactoryFromSource(loaderSource);
-    const wasmModule = await moduleFactory({
-      wasmBinary,
-      locateFile(filename) {
-        return filename;
-      }
-    });
-    const liteRt = new LiteRt(wasmModule);
-    setGlobalLiteRt(liteRt);
-    liteRt.setDefaultEnvironment(
-      await Environment.create()
-    );
-    return liteRt;
-  })().catch((error) => {
     setGlobalLiteRtPromise(void 0);
     throw error;
   }));
@@ -1508,7 +1597,8 @@ export {
   isWebGPUSupported,
   loadAndCompile,
   loadLiteRt,
-  loadLiteRtFromBundledAssets,
   setWebGpuDevice,
+  supportsFeature,
   unloadLiteRt
 };
+//# sourceMappingURL=index.js.map

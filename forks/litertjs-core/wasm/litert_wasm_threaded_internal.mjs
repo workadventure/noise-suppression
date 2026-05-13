@@ -7,7 +7,7 @@ var ModuleFactory = (() => {
   // When MODULARIZE this JS may be executed later,
   // after document.currentScript is gone, so we save it.
   // In EXPORT_ES6 mode we can just use 'import.meta.url'.
-  var _scriptName = globalThis.document?.currentScript?.src;
+  var _scriptName = import.meta.url;
   return async function(moduleArg = {}) {
     var moduleRtn;
 
@@ -39,6 +39,23 @@ var ENVIRONMENT_IS_WORKER = !!globalThis.WorkerGlobalScope;
 // N.b. Electron.js environment is simultaneously a NODE-environment, but
 // also a web environment.
 var ENVIRONMENT_IS_NODE = globalThis.process?.versions?.node && globalThis.process?.type != "renderer";
+
+// Three configurations we can be running in:
+// 1) We could be the application main() thread running in the main JS UI thread. (ENVIRONMENT_IS_WORKER == false and ENVIRONMENT_IS_PTHREAD == false)
+// 2) We could be the application main() running directly in a worker. (ENVIRONMENT_IS_WORKER == true, ENVIRONMENT_IS_PTHREAD == false)
+// 3) We could be an application pthread running in a worker. (ENVIRONMENT_IS_WORKER == true and ENVIRONMENT_IS_PTHREAD == true)
+// The way we signal to a worker that it is hosting a pthread is to construct
+// it with a specific name.
+var ENVIRONMENT_IS_PTHREAD = ENVIRONMENT_IS_WORKER && globalThis.name == "em-pthread";
+
+if (ENVIRONMENT_IS_NODE) {
+  var worker_threads = require("node:worker_threads");
+  globalThis.Worker = worker_threads.Worker;
+  ENVIRONMENT_IS_WORKER = !worker_threads.isMainThread;
+  // Under node we set `workerData` to `em-pthread` to signal that the worker
+  // is hosting a pthread.
+  ENVIRONMENT_IS_PTHREAD = ENVIRONMENT_IS_WORKER && worker_threads.workerData == "em-pthread";
+}
 
 // --pre-jses are emitted after the Module integration code, so that they can
 // refer to Module (if they choose; they can also define Module)
@@ -104,7 +121,9 @@ if (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) {
   try {
     scriptDirectory = new URL(".", _scriptName).href;
   } catch {}
-  {
+  // Differentiate the Web Worker from the Node Worker case, as reading must
+  // be done differently.
+  if (!ENVIRONMENT_IS_NODE) {
     // include: web_or_worker_shell_read.js
     if (ENVIRONMENT_IS_WORKER) {
       readBinary = url => {
@@ -148,9 +167,26 @@ if (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) {
   }
 } else {}
 
-var out = console.log.bind(console);
+// Set up the out() and err() hooks, which are how we can print to stdout or
+// stderr, respectively.
+// Normally just binding console.log/console.error here works fine, but
+// under node (with workers) we see missing/out-of-order messages so route
+// directly to stdout and stderr.
+// See https://github.com/emscripten-core/emscripten/issues/14804
+var defaultPrint = console.log.bind(console);
 
-var err = console.error.bind(console);
+var defaultPrintErr = console.error.bind(console);
+
+if (ENVIRONMENT_IS_NODE) {
+  var utils = require("node:util");
+  var stringify = a => typeof a == "object" ? utils.inspect(a) : a;
+  defaultPrint = (...args) => fs.writeSync(1, args.map(stringify).join(" ") + "\n");
+  defaultPrintErr = (...args) => fs.writeSync(2, args.map(stringify).join(" ") + "\n");
+}
+
+var out = defaultPrint;
+
+var err = defaultPrintErr;
 
 // end include: shell.js
 // include: preamble.js
@@ -165,6 +201,9 @@ var err = console.error.bind(console);
 var wasmBinary;
 
 // Wasm globals
+// For sending to workers.
+var wasmModule;
+
 //========================================
 // Runtime essentials
 //========================================
@@ -207,8 +246,156 @@ class EmscriptenSjLj extends EmscriptenEH {}
 // end include: runtime_exceptions.js
 // include: runtime_debug.js
 // end include: runtime_debug.js
+// Support for growable heap + pthreads, where the buffer may change, so JS views
+// must be updated.
+function growMemViews() {
+  // `updateMemoryViews` updates all the views simultaneously, so it's enough to check any of them.
+  if (wasmMemory.buffer != HEAP8.buffer) {
+    updateMemoryViews();
+  }
+}
+
 var readyPromiseResolve, readyPromiseReject;
 
+if (ENVIRONMENT_IS_NODE && (ENVIRONMENT_IS_PTHREAD)) {
+  // Create as web-worker-like an environment as we can.
+  globalThis.self = globalThis;
+  var parentPort = worker_threads.parentPort;
+  // Deno and Bun already have `postMessage` defined on the global scope and
+  // deliver messages to `globalThis.onmessage`, so we must not duplicate that
+  // behavior here if `postMessage` is already present.
+  if (!globalThis.postMessage) {
+    parentPort.on("message", msg => globalThis.onmessage?.({
+      data: msg
+    }));
+    globalThis.postMessage = msg => parentPort.postMessage(msg);
+  }
+  // Node.js Workers do not pass postMessage()s and uncaught exception events to the parent
+  // thread necessarily in the same order where they were generated in sequential program order.
+  // See https://github.com/nodejs/node/issues/59617
+  // To remedy this, capture all uncaughtExceptions in the Worker, and sequentialize those over
+  // to the same postMessage pipe that other messages use.
+  process.on("uncaughtException", err => {
+    postMessage({
+      cmd: "uncaughtException",
+      error: err
+    });
+    // Also shut down the Worker to match the same semantics as if this uncaughtException
+    // handler was not registered.
+    // (n.b. this will not shut down the whole Node.js app process, but just the Worker)
+    process.exit(1);
+  });
+}
+
+// include: runtime_pthread.js
+// Pthread Web Worker handling code.
+// This code runs only on pthread web workers and handles pthread setup
+// and communication with the main thread via postMessage.
+var startWorker;
+
+if (ENVIRONMENT_IS_PTHREAD) {
+  // Thread-local guard variable for one-time init of the JS state
+  var initializedJS = false;
+  // Turn unhandled rejected promises into errors so that the main thread will be
+  // notified about them.
+  self.onunhandledrejection = e => {
+    throw e.reason || e;
+  };
+  function handleMessage(e) {
+    try {
+      var msgData = e["data"];
+      //dbg('msgData: ' + Object.keys(msgData));
+      var cmd = msgData.cmd;
+      if (cmd === "load") {
+        // Preload command that is called once per worker to parse and load the Emscripten code.
+        // Until we initialize the runtime, queue up any further incoming messages.
+        let messageQueue = [];
+        self.onmessage = e => messageQueue.push(e);
+        // And add a callback for when the runtime is initialized.
+        startWorker = () => {
+          // Notify the main thread that this thread has loaded.
+          postMessage({
+            cmd: "loaded"
+          });
+          // Process any messages that were queued before the thread was ready.
+          for (let msg of messageQueue) {
+            handleMessage(msg);
+          }
+          // Restore the real message handler.
+          self.onmessage = handleMessage;
+        };
+        // Use `const` here to ensure that the variable is scoped only to
+        // that iteration, allowing safe reference from a closure.
+        for (const handler of msgData.handlers) {
+          // If the main module has a handler for a certain event, but no
+          // handler exists on the pthread worker, then proxy that handler
+          // back to the main thread.
+          if (!Module[handler] || Module[handler].proxy) {
+            Module[handler] = (...args) => {
+              postMessage({
+                cmd: "callHandler",
+                handler,
+                args
+              });
+            };
+            // Rebind the out / err handlers if needed
+            if (handler == "print") out = Module[handler];
+            if (handler == "printErr") err = Module[handler];
+          }
+        }
+        wasmMemory = msgData.wasmMemory;
+        updateMemoryViews();
+        wasmModule = msgData.wasmModule;
+        createWasm();
+        run();
+      } else if (cmd === "run") {
+        // Call inside JS module to set up the stack frame for this pthread in JS module scope.
+        // This needs to be the first thing that we do, as we cannot call to any C/C++ functions
+        // until the thread stack is initialized.
+        establishStackSpace(msgData.pthread_ptr);
+        // Pass the thread address to wasm to store it for fast access.
+        __emscripten_thread_init(msgData.pthread_ptr, /*is_main=*/ 0, /*is_runtime=*/ 0, /*can_block=*/ 1, 0, 0);
+        PThread.threadInitTLS();
+        // Await mailbox notifications with `Atomics.waitAsync` so we can start
+        // using the fast `Atomics.notify` notification path.
+        __emscripten_thread_mailbox_await(msgData.pthread_ptr);
+        if (!initializedJS) {
+          // Embind must initialize itself on all threads, as it generates support JS.
+          // We only do this once per worker since they get reused
+          __embind_initialize_bindings();
+          initializedJS = true;
+        }
+        try {
+          invokeEntryPoint(msgData.start_routine, msgData.arg);
+        } catch (ex) {
+          if (ex != "unwind") {
+            // The pthread "crashed".  Do not call `_emscripten_thread_exit` (which
+            // would make this thread joinable).  Instead, re-throw the exception
+            // and let the top level handler propagate it back to the main thread.
+            throw ex;
+          }
+        }
+      } else if (msgData.target === "setimmediate") {} else if (cmd === "checkMailbox") {
+        if (initializedJS) {
+          checkMailbox();
+        }
+      } else if (cmd) {
+        // The received message looks like something that should be handled by this message
+        // handler, (since there is a cmd field present), but is not one of the
+        // recognized commands:
+        err(`worker: received unknown command ${cmd}`);
+        err(msgData);
+      }
+    } catch (ex) {
+      __emscripten_thread_crashed();
+      throw ex;
+    }
+  }
+  self.onmessage = handleMessage;
+}
+
+// ENVIRONMENT_IS_PTHREAD
+// end include: runtime_pthread.js
 // Memory management
 var runtimeInitialized = false;
 
@@ -224,6 +411,33 @@ function updateMemoryViews() {
   HEAPF64 = new Float64Array(b);
 }
 
+// In non-standalone/normal mode, we create the memory here.
+// include: runtime_init_memory.js
+// Create the wasm memory. (Note: this only applies if IMPORTED_MEMORY is defined)
+// check for full engine support (use string 'subarray' to avoid closure compiler confusion)
+function initMemory() {
+  if ((ENVIRONMENT_IS_PTHREAD)) {
+    return;
+  }
+  if (Module["wasmMemory"]) {
+    wasmMemory = Module["wasmMemory"];
+  } else {
+    var INITIAL_MEMORY = Module["INITIAL_MEMORY"] || 16777216;
+    /** @suppress {checkTypes} */ wasmMemory = new WebAssembly.Memory({
+      "initial": INITIAL_MEMORY / 65536,
+      // In theory we should not need to emit the maximum if we want "unlimited"
+      // or 4GB of memory, but VMs error on that atm, see
+      // https://github.com/emscripten-core/emscripten/issues/14130
+      // And in the pthreads case we definitely need to emit a maximum. So
+      // always emit one.
+      "maximum": 32768,
+      "shared": true
+    });
+  }
+  updateMemoryViews();
+}
+
+// end include: runtime_init_memory.js
 // include: memoryprofiler.js
 // end include: memoryprofiler.js
 // end include: runtime_common.js
@@ -240,16 +454,20 @@ function preRun() {
 
 function initRuntime() {
   runtimeInitialized = true;
+  if (ENVIRONMENT_IS_PTHREAD) return startWorker();
   // Begin ATINITS hooks
   if (!Module["noFSInit"] && !FS.initialized) FS.init();
   TTY.init();
   // End ATINITS hooks
-  wasmExports["kb"]();
+  wasmExports["vb"]();
   // Begin ATPOSTCTORS hooks
   FS.ignorePermissions = false;
 }
 
 function postRun() {
+  if ((ENVIRONMENT_IS_PTHREAD)) {
+    return;
+  }
   // PThreads reuse the runtime from the main thread.
   if (Module["postRun"]) {
     if (typeof Module["postRun"] == "function") Module["postRun"] = [ Module["postRun"] ];
@@ -294,7 +512,7 @@ function postRun() {
 var wasmBinaryFile;
 
 function findWasmBinary() {
-  return locateFile("litert_wasm_internal.wasm");
+  return locateFile("litert_wasm_threaded_internal.wasm");
 }
 
 function getBinarySync(file) {
@@ -352,6 +570,7 @@ async function instantiateAsync(binary, binaryFile, imports) {
 }
 
 function getWasmImports() {
+  assignWasmImports();
   // prepare imports
   var imports = {
     "a": wasmImports
@@ -367,17 +586,17 @@ async function createWasm() {
   // performing other necessary setup
   /** @param {WebAssembly.Module=} module*/ function receiveInstance(instance, module) {
     wasmExports = instance.exports;
+    registerTLSInit(wasmExports["Ic"]);
     assignWasmExports(wasmExports);
-    updateMemoryViews();
+    // We now have the Wasm module loaded up, keep a reference to the compiled module so we can post it to the workers.
+    wasmModule = module;
     return wasmExports;
   }
   // Prefer streaming instantiation if available.
   function receiveInstantiationResult(result) {
     // 'result' is a ResultObject object which has both the module and instance.
     // receiveInstance() will swap in the exports (to Module.asm) so they can be called
-    // TODO: Due to Closure regression https://github.com/google/closure-compiler/issues/3193, the above line no longer optimizes out down to the following line.
-    // When the regression is fixed, can restore the above PTHREADS-enabled path.
-    return receiveInstance(result["instance"]);
+    return receiveInstance(result["instance"], result["module"]);
   }
   var info = getWasmImports();
   // User shell pages can write their own Module.instantiateWasm = function(imports, successCallback) callback
@@ -392,6 +611,12 @@ async function createWasm() {
         resolve(receiveInstance(inst, mod));
       });
     });
+  }
+  if ((ENVIRONMENT_IS_PTHREAD)) {
+    // Instantiate from the module that was received via postMessage from
+    // the main thread. We can just use sync instantiation in the worker.
+    var instance = new WebAssembly.Instance(wasmModule, getWasmImports());
+    return receiveInstance(instance, wasmModule);
   }
   wasmBinaryFile ??= findWasmBinary();
   var result = await instantiateAsync(wasmBinary, wasmBinaryFile, info);
@@ -430,17 +655,344 @@ var runtimeKeepaliveCounter = 0;
 
 var keepRuntimeAlive = () => noExitRuntime || runtimeKeepaliveCounter > 0;
 
-var _proc_exit = code => {
+var stackSave = () => _emscripten_stack_get_current();
+
+var stackRestore = val => __emscripten_stack_restore(val);
+
+var stackAlloc = sz => __emscripten_stack_alloc(sz);
+
+var terminateWorker = worker => {
+  worker.terminate();
+  // terminate() can be asynchronous, so in theory the worker can continue
+  // to run for some amount of time after termination.  However from our POV
+  // the worker is now dead and we don't want to hear from it again, so we stub
+  // out its message handler here.  This avoids having to check in each of
+  // the onmessage handlers if the message was coming from a valid worker.
+  worker.onmessage = e => {};
+};
+
+var cleanupThread = pthread_ptr => {
+  var worker = PThread.pthreads[pthread_ptr];
+  PThread.returnWorkerToPool(worker);
+};
+
+var callRuntimeCallbacks = callbacks => {
+  while (callbacks.length > 0) {
+    // Pass the module as the first argument.
+    callbacks.shift()(Module);
+  }
+};
+
+var onPreRuns = [];
+
+var addOnPreRun = cb => onPreRuns.push(cb);
+
+var runDependencies = 0;
+
+var dependenciesFulfilled = null;
+
+var removeRunDependency = id => {
+  runDependencies--;
+  Module["monitorRunDependencies"]?.(runDependencies);
+  if (runDependencies == 0) {
+    if (dependenciesFulfilled) {
+      var callback = dependenciesFulfilled;
+      dependenciesFulfilled = null;
+      callback();
+    }
+  }
+};
+
+var addRunDependency = id => {
+  runDependencies++;
+  Module["monitorRunDependencies"]?.(runDependencies);
+};
+
+var spawnThread = threadParams => {
+  var worker = PThread.getNewWorker();
+  if (!worker) {
+    // No available workers in the PThread pool.
+    return 6;
+  }
+  PThread.runningWorkers.push(worker);
+  // Add to pthreads map
+  PThread.pthreads[threadParams.pthread_ptr] = worker;
+  worker.pthread_ptr = threadParams.pthread_ptr;
+  var msg = {
+    cmd: "run",
+    start_routine: threadParams.startRoutine,
+    arg: threadParams.arg,
+    pthread_ptr: threadParams.pthread_ptr
+  };
+  if (ENVIRONMENT_IS_NODE) {
+    // Mark worker as weakly referenced once we start executing a pthread,
+    // so that its existence does not prevent Node.js from exiting.  This
+    // has no effect if the worker is already weakly referenced (e.g. if
+    // this worker was previously idle/unused).
+    worker.unref();
+  }
+  // Ask the worker to start executing its pthread entry point function.
+  worker.postMessage(msg, threadParams.transferList);
+  return 0;
+};
+
+var PThread = {
+  unusedWorkers: [],
+  runningWorkers: [],
+  tlsInitFunctions: [],
+  pthreads: {},
+  init() {
+    if ((!(ENVIRONMENT_IS_PTHREAD))) {
+      PThread.initMainThread();
+    }
+  },
+  initMainThread() {
+    var pthreadPoolSize = navigator.hardwareConcurrency;
+    // Start loading up the Worker pool, if requested.
+    while (pthreadPoolSize--) {
+      PThread.allocateUnusedWorker();
+    }
+    // MINIMAL_RUNTIME takes care of calling loadWasmModuleToAllWorkers
+    // in postamble_minimal.js
+    addOnPreRun(async () => {
+      var pthreadPoolReady = PThread.loadWasmModuleToAllWorkers();
+      addRunDependency("loading-workers");
+      await pthreadPoolReady;
+      removeRunDependency("loading-workers");
+    });
+  },
+  terminateAllThreads: () => {
+    // Attempt to kill all workers.  Sadly (at least on the web) there is no
+    // way to terminate a worker synchronously, or to be notified when a
+    // worker is actually terminated.  This means there is some risk that
+    // pthreads will continue to be executing after `worker.terminate` has
+    // returned.  For this reason, we don't call `returnWorkerToPool` here or
+    // free the underlying pthread data structures.
+    for (var worker of PThread.runningWorkers) {
+      terminateWorker(worker);
+    }
+    for (var worker of PThread.unusedWorkers) {
+      terminateWorker(worker);
+    }
+    PThread.unusedWorkers = [];
+    PThread.runningWorkers = [];
+    PThread.pthreads = {};
+  },
+  returnWorkerToPool: worker => {
+    // We don't want to run main thread queued calls here, since we are doing
+    // some operations that leave the worker queue in an invalid state until
+    // we are completely done (it would be bad if free() ends up calling a
+    // queued pthread_create which looks at the global data structures we are
+    // modifying). To achieve that, defer the free() until the very end, when
+    // we are all done.
+    var pthread_ptr = worker.pthread_ptr;
+    delete PThread.pthreads[pthread_ptr];
+    // Note: worker is intentionally not terminated so the pool can
+    // dynamically grow.
+    PThread.unusedWorkers.push(worker);
+    PThread.runningWorkers.splice(PThread.runningWorkers.indexOf(worker), 1);
+    // Not a running Worker anymore
+    // Detach the worker from the pthread object, and return it to the
+    // worker pool as an unused worker.
+    worker.pthread_ptr = 0;
+    // Finally, free the underlying (and now-unused) pthread structure in
+    // linear memory.
+    __emscripten_thread_free_data(pthread_ptr);
+  },
+  threadInitTLS() {
+    // Call thread init functions (these are the _emscripten_tls_init for each
+    // module loaded.
+    PThread.tlsInitFunctions.forEach(f => f());
+  },
+  loadWasmModuleToWorker: worker => new Promise(onFinishedLoading => {
+    worker.onmessage = e => {
+      var d = e["data"];
+      var cmd = d.cmd;
+      // If this message is intended to a recipient that is not the main
+      // thread, forward it to the target thread.
+      if (d.targetThread && d.targetThread != _pthread_self()) {
+        var targetWorker = PThread.pthreads[d.targetThread];
+        if (targetWorker) {
+          targetWorker.postMessage(d, d.transferList);
+        } else {
+          err(`Internal error! Worker sent a message "${cmd}" to target pthread ${d.targetThread}, but that thread no longer exists!`);
+        }
+        return;
+      }
+      if (cmd === "checkMailbox") {
+        checkMailbox();
+      } else if (cmd === "spawnThread") {
+        spawnThread(d);
+      } else if (cmd === "cleanupThread") {
+        // cleanupThread needs to be run via callUserCallback since it calls
+        // back into user code to free thread data. Without this it's possible
+        // the unwind or ExitStatus exception could escape here.
+        callUserCallback(() => cleanupThread(d.thread));
+      } else if (cmd === "loaded") {
+        worker.loaded = true;
+        // Check that this worker doesn't have an associated pthread.
+        if (ENVIRONMENT_IS_NODE && !worker.pthread_ptr) {
+          // Once worker is loaded & idle, mark it as weakly referenced,
+          // so that mere existence of a Worker in the pool does not prevent
+          // Node.js from exiting the app.
+          worker.unref();
+        }
+        onFinishedLoading(worker);
+      } else if (d.target === "setimmediate") {
+        // Worker wants to postMessage() to itself to implement setImmediate()
+        // emulation.
+        worker.postMessage(d);
+      } else if (cmd === "uncaughtException") {
+        // Message handler for Node.js specific out-of-order behavior:
+        // https://github.com/nodejs/node/issues/59617
+        // A pthread sent an uncaught exception event. Re-raise it on the main thread.
+        worker.onerror(d.error);
+      } else if (cmd === "callHandler") {
+        Module[d.handler](...d.args);
+      } else if (cmd) {
+        // The received message looks like something that should be handled by this message
+        // handler, (since there is a e.data.cmd field present), but is not one of the
+        // recognized commands:
+        err(`worker sent an unknown command ${cmd}`);
+      }
+    };
+    worker.onerror = e => {
+      var message = "worker sent an error!";
+      err(`${message} ${e.filename}:${e.lineno}: ${e.message}`);
+      throw e;
+    };
+    if (ENVIRONMENT_IS_NODE) {
+      worker.on("message", data => worker.onmessage({
+        data
+      }));
+      worker.on("error", e => worker.onerror(e));
+    }
+    // When running on a pthread, none of the incoming parameters on the module
+    // object are present. Proxy known handlers back to the main thread if specified.
+    var handlers = [];
+    var knownHandlers = [ "onExit", "onAbort", "print", "printErr" ];
+    for (var handler of knownHandlers) {
+      if (Module.propertyIsEnumerable(handler)) {
+        handlers.push(handler);
+      }
+    }
+    // Ask the new worker to load up the Emscripten-compiled page. This is a heavy operation.
+    worker.postMessage({
+      cmd: "load",
+      handlers,
+      wasmMemory,
+      wasmModule
+    });
+  }),
+  async loadWasmModuleToAllWorkers() {
+    // Instantiation is synchronous in pthreads.
+    if (ENVIRONMENT_IS_PTHREAD) {
+      return;
+    }
+    let pthreadPoolReady = Promise.all(PThread.unusedWorkers.map(PThread.loadWasmModuleToWorker));
+    return pthreadPoolReady;
+  },
+  allocateUnusedWorker() {
+    var worker;
+    var pthreadMainJs = _scriptName;
+    // We can't use makeModuleReceiveWithVar here since we want to also
+    // call URL.createObjectURL on the mainScriptUrlOrBlob.
+    if (Module["mainScriptUrlOrBlob"]) {
+      pthreadMainJs = Module["mainScriptUrlOrBlob"];
+      if (typeof pthreadMainJs != "string") {
+        pthreadMainJs = URL.createObjectURL(pthreadMainJs);
+      }
+    }
+    // Use Trusted Types compatible wrappers.
+    if (globalThis.trustedTypes?.createPolicy) {
+      var p = trustedTypes.createPolicy("emscripten#workerPolicy2", {
+        createScriptURL: ignored => pthreadMainJs
+      });
+      worker = new Worker(p.createScriptURL("ignored"), {
+        // This is the way that we signal to the node worker that it is hosting
+        // a pthread.
+        "workerData": "em-pthread",
+        // This is the way that we signal to the Web Worker that it is hosting
+        // a pthread.
+        "name": "em-pthread"
+      });
+    } else worker = new Worker(pthreadMainJs, {
+      // This is the way that we signal to the node worker that it is hosting
+      // a pthread.
+      "workerData": "em-pthread",
+      // This is the way that we signal to the Web Worker that it is hosting
+      // a pthread.
+      "name": "em-pthread"
+    });
+    PThread.unusedWorkers.push(worker);
+  },
+  getNewWorker() {
+    if (PThread.unusedWorkers.length == 0) {
+      // PTHREAD_POOL_SIZE_STRICT should show a warning and, if set to level `2`, return from the function.
+      PThread.allocateUnusedWorker();
+      PThread.loadWasmModuleToWorker(PThread.unusedWorkers[0]);
+    }
+    return PThread.unusedWorkers.pop();
+  }
+};
+
+/** @type{function(number, (number|boolean), ...number)} */ var proxyToMainThread = (funcIndex, emAsmAddr, proxyMode, ...callArgs) => {
+  // EM_ASM proxying is done by passing a pointer to the address of the EM_ASM
+  // content as `emAsmAddr`.  JS library proxying is done by passing an index
+  // into `proxiedJSCallArgs` as `funcIndex`. If `emAsmAddr` is non-zero then
+  // `funcIndex` will be ignored.
+  // Additional arguments are passed after the first three are the actual
+  // function arguments.
+  // The serialization buffer contains the number of call params, and then
+  // all the args here.
+  // We also pass 'proxyMode' to C separately, since C needs to look at it.
+  // Allocate a buffer (on the stack), which will be copied if necessary by
+  // the C code.
+  // First passed parameter specifies the number of arguments to the function.
+  // When BigInt support is enabled, we must handle types in a more complex
+  // way, detecting at runtime if a value is a BigInt or not (as we have no
+  // type info here). To do that, add a "prefix" before each value that
+  // indicates if it is a BigInt, which effectively doubles the number of
+  // values we serialize for proxying. TODO: pack this?
+  var bufSize = 8 * callArgs.length;
+  var sp = stackSave();
+  var args = stackAlloc(bufSize);
+  var b = ((args) >> 3);
+  for (var arg of callArgs) {
+    (growMemViews(), HEAPF64)[b++] = arg;
+  }
+  var rtn = __emscripten_run_js_on_main_thread(funcIndex, emAsmAddr, bufSize, args, proxyMode);
+  stackRestore(sp);
+  return rtn;
+};
+
+function _proc_exit(code) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(0, 0, 1, code);
   EXITSTATUS = code;
   if (!keepRuntimeAlive()) {
+    PThread.terminateAllThreads();
     Module["onExit"]?.(code);
     ABORT = true;
   }
   quit_(code, new ExitStatus(code));
-};
+}
+
+function exitOnMainThread(returnCode) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(1, 0, 0, returnCode);
+  _exit(returnCode);
+}
 
 /** @param {boolean|number=} implicit */ var exitJS = (status, implicit) => {
   EXITSTATUS = status;
+  if (ENVIRONMENT_IS_PTHREAD) {
+    // implicit exit can never happen on a pthread
+    // When running in a pthread we propagate the exit back to the main thread
+    // where it can decide if the whole process should be shut down or not.
+    // The pthread may have decided not to exit its own runtime, for example
+    // because it runs a main loop, but that doesn't affect the main thread.
+    exitOnMainThread(status);
+    throw "unwind";
+  }
   _proc_exit(status);
 };
 
@@ -449,6 +1001,13 @@ var _exit = exitJS;
 var maybeExit = () => {
   if (!keepRuntimeAlive()) {
     try {
+      if (ENVIRONMENT_IS_PTHREAD) {
+        // exit the current thread, but only if there is one active.
+        // TODO(https://github.com/emscripten-core/emscripten/issues/25076):
+        // Unify this check with the runtimeExited check above
+        if (_pthread_self()) __emscripten_thread_exit(EXITSTATUS);
+        return;
+      }
       _exit(EXITSTATUS);
     } catch (e) {
       handleException(e);
@@ -473,9 +1032,21 @@ function getFullscreenElement() {
   return document.fullscreenElement || document.mozFullScreenElement || document.webkitFullscreenElement || document.webkitCurrentFullScreenElement || document.msFullscreenElement;
 }
 
-/** @param {number=} timeout */ var safeSetTimeout = (func, timeout) => setTimeout(() => {
-  callUserCallback(func);
-}, timeout);
+var runtimeKeepalivePush = () => {
+  runtimeKeepaliveCounter += 1;
+};
+
+var runtimeKeepalivePop = () => {
+  runtimeKeepaliveCounter -= 1;
+};
+
+/** @param {number=} timeout */ var safeSetTimeout = (func, timeout) => {
+  runtimeKeepalivePush();
+  return setTimeout(() => {
+    runtimeKeepalivePop();
+    callUserCallback(func);
+  }, timeout);
+};
 
 var warnOnce = text => {
   warnOnce.shown ||= {};
@@ -872,10 +1443,10 @@ var Browser = {
   setFullscreenCanvasSize() {
     // check if SDL is available
     if (typeof SDL != "undefined") {
-      var flags = HEAPU32[((SDL.screen) >> 2)];
+      var flags = (growMemViews(), HEAPU32)[((SDL.screen) >> 2)];
       flags = flags | 8388608;
       // set SDL_FULLSCREEN flag
-      HEAP32[((SDL.screen) >> 2)] = flags;
+      (growMemViews(), HEAP32)[((SDL.screen) >> 2)] = flags;
     }
     Browser.updateCanvasDimensions(Browser.getCanvas());
     Browser.updateResizeListeners();
@@ -883,10 +1454,10 @@ var Browser = {
   setWindowedCanvasSize() {
     // check if SDL is available
     if (typeof SDL != "undefined") {
-      var flags = HEAPU32[((SDL.screen) >> 2)];
+      var flags = (growMemViews(), HEAPU32)[((SDL.screen) >> 2)];
       flags = flags & ~8388608;
       // clear SDL_FULLSCREEN flag
-      HEAP32[((SDL.screen) >> 2)] = flags;
+      (growMemViews(), HEAP32)[((SDL.screen) >> 2)] = flags;
     }
     Browser.updateCanvasDimensions(Browser.getCanvas());
     Browser.updateResizeListeners();
@@ -952,26 +1523,115 @@ var Browser = {
 
 /** @type {!Uint8Array} */ var HEAPU8;
 
-var callRuntimeCallbacks = callbacks => {
-  while (callbacks.length > 0) {
-    // Pass the module as the first argument.
-    callbacks.shift()(Module);
-  }
-};
-
 var onPostRuns = [];
 
 var addOnPostRun = cb => onPostRuns.push(cb);
 
-var onPreRuns = [];
+function establishStackSpace(pthread_ptr) {
+  var stackHigh = (growMemViews(), HEAPU32)[(((pthread_ptr) + (48)) >> 2)];
+  var stackSize = (growMemViews(), HEAPU32)[(((pthread_ptr) + (52)) >> 2)];
+  var stackLow = stackHigh - stackSize;
+  // Set stack limits used by `emscripten/stack.h` function.  These limits are
+  // cached in wasm-side globals to make checks as fast as possible.
+  _emscripten_stack_set_limits(stackHigh, stackLow);
+  // Call inside wasm module to set up the stack frame for this pthread in wasm module scope
+  stackRestore(stackHigh);
+}
 
-var addOnPreRun = cb => onPreRuns.push(cb);
+var wasmTableMirror = [];
+
+var getWasmTableEntry = funcPtr => {
+  var func = wasmTableMirror[funcPtr];
+  if (!func) {
+    /** @suppress {checkTypes} */ wasmTableMirror[funcPtr] = func = wasmTable.get(funcPtr);
+  }
+  return func;
+};
+
+var invokeEntryPoint = (ptr, arg) => {
+  // An old thread on this worker may have been canceled without returning the
+  // `runtimeKeepaliveCounter` to zero. Reset it now so the new thread won't
+  // be affected.
+  runtimeKeepaliveCounter = 0;
+  // Same for noExitRuntime.  The default for pthreads should always be false
+  // otherwise pthreads would never complete and attempts to pthread_join to
+  // them would block forever.
+  // pthreads can still choose to set `noExitRuntime` explicitly, or
+  // call emscripten_unwind_to_js_event_loop to extend their lifetime beyond
+  // their main function.  See comment in src/runtime_pthread.js for more.
+  noExitRuntime = 0;
+  // pthread entry points are always of signature 'void *ThreadMain(void *arg)'
+  // Native codebases sometimes spawn threads with other thread entry point
+  // signatures, such as void ThreadMain(void *arg), void *ThreadMain(), or
+  // void ThreadMain().  That is not acceptable per C/C++ specification, but
+  // x86 compiler ABI extensions enable that to work. If you find the
+  // following line to crash, either change the signature to "proper" void
+  // *ThreadMain(void *arg) form, or try linking with the Emscripten linker
+  // flag -sEMULATE_FUNCTION_POINTER_CASTS to add in emulation for this x86
+  // ABI extension.
+  var result = getWasmTableEntry(ptr)(arg);
+  function finish(result) {
+    // In MINIMAL_RUNTIME the noExitRuntime concept does not apply to
+    // pthreads. To exit a pthread with live runtime, use the function
+    // emscripten_unwind_to_js_event_loop() in the pthread body.
+    if (keepRuntimeAlive()) {
+      EXITSTATUS = result;
+      return;
+    }
+    __emscripten_thread_exit(result);
+  }
+  finish(result);
+};
 
 var noExitRuntime = true;
 
-var stackRestore = val => __emscripten_stack_restore(val);
+var registerTLSInit = tlsInitFunc => PThread.tlsInitFunctions.push(tlsInitFunc);
 
-var stackSave = () => _emscripten_stack_get_current();
+var wasmMemory;
+
+function pthreadCreateProxied(pthread_ptr, attr, startRoutine, arg) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(2, 0, 1, pthread_ptr, attr, startRoutine, arg);
+  return ___pthread_create_js(pthread_ptr, attr, startRoutine, arg);
+}
+
+var _emscripten_has_threading_support = () => !!globalThis.SharedArrayBuffer;
+
+var ___pthread_create_js = (pthread_ptr, attr, startRoutine, arg) => {
+  if (!_emscripten_has_threading_support()) {
+    return 6;
+  }
+  // List of JS objects that will transfer ownership to the Worker hosting the thread
+  var transferList = [];
+  var error = 0;
+  // Synchronously proxy the thread creation to main thread if possible. If we
+  // need to transfer ownership of objects, then proxy asynchronously via
+  // postMessage.
+  if (ENVIRONMENT_IS_PTHREAD && (transferList.length === 0 || error)) {
+    return pthreadCreateProxied(pthread_ptr, attr, startRoutine, arg);
+  }
+  // If on the main thread, and accessing Canvas/OffscreenCanvas failed, abort
+  // with the detected error.
+  if (error) return error;
+  var threadParams = {
+    startRoutine,
+    pthread_ptr,
+    arg,
+    transferList
+  };
+  if (ENVIRONMENT_IS_PTHREAD) {
+    // The prepopulated pool of web workers that can host pthreads is stored
+    // in the main JS thread. Therefore if a pthread is attempting to spawn a
+    // new thread, the thread creation must be deferred to the main JS thread.
+    threadParams.cmd = "spawnThread";
+    postMessage(threadParams, transferList);
+    // When we defer thread creation this way, we have no way to detect thread
+    // creation synchronously today, so we have to assume success and return 0.
+    return 0;
+  }
+  // We are the main thread, so we have the pthread warmup pool in this
+  // thread and can fire off JS thread creation directly ourselves.
+  return spawnThread(threadParams);
+};
 
 var PATH = {
   isAbs: path => path.charAt(0) === "/",
@@ -1037,7 +1697,10 @@ var initRandomFill = () => {
     var nodeCrypto = require("node:crypto");
     return view => nodeCrypto.randomFillSync(view);
   }
-  return view => (crypto.getRandomValues(view), 0);
+  // like with most Web APIs, we can't use Web Crypto API directly on shared memory,
+  // so we need to create an intermediate buffer and copy it to the destination
+  return view => (view.set(crypto.getRandomValues(new Uint8Array(view.byteLength))), 
+  0);
 };
 
 var randomFill = view => (randomFill = initRandomFill())(view);
@@ -1119,7 +1782,7 @@ var findStringEnd = (heapOrArray, idx, maxBytesToRead, ignoreNul) => {
    * @return {string}
    */ var UTF8ArrayToString = (heapOrArray, idx = 0, maxBytesToRead, ignoreNul) => {
   var endPtr = findStringEnd(heapOrArray, idx, maxBytesToRead, ignoreNul);
-  return UTF8Decoder.decode(heapOrArray.buffer ? heapOrArray.subarray(idx, endPtr) : new Uint8Array(heapOrArray.slice(idx, endPtr)));
+  return UTF8Decoder.decode(heapOrArray.buffer ? heapOrArray.buffer instanceof ArrayBuffer ? heapOrArray.subarray(idx, endPtr) : heapOrArray.slice(idx, endPtr) : new Uint8Array(heapOrArray.slice(idx, endPtr)));
 };
 
 var FS_stdin_getChar_buffer = [];
@@ -1360,7 +2023,7 @@ var TTY = {
   }
 };
 
-var zeroMemory = (ptr, size) => HEAPU8.fill(0, ptr, ptr + size);
+var zeroMemory = (ptr, size) => (growMemViews(), HEAPU8).fill(0, ptr, ptr + size);
 
 var alignMemory = (size, alignment) => Math.ceil(size / alignment) * alignment;
 
@@ -1599,7 +2262,7 @@ var MEMFS = {
       // memory can grow, we can't hold on to references of the
       // memory buffer, as they may get invalidated. That means we
       // need to copy its contents.
-      if (buffer.buffer === HEAP8.buffer) {
+      if (buffer.buffer === (growMemViews(), HEAP8).buffer) {
         canOwn = false;
       }
       if (!length) return 0;
@@ -1642,7 +2305,7 @@ var MEMFS = {
       var allocated;
       var contents = stream.node.contents;
       // Only make a new copy when MAP_PRIVATE is specified.
-      if (!(flags & 2) && contents.buffer === HEAP8.buffer) {
+      if (!(flags & 2) && contents.buffer === (growMemViews(), HEAP8).buffer) {
         // We can't emulate MAP_SHARED when the file is not backed by the
         // buffer we're mapping to (e.g. the HEAP buffer).
         allocated = false;
@@ -1662,7 +2325,7 @@ var MEMFS = {
               contents = Array.prototype.slice.call(contents, position, position + length);
             }
           }
-          HEAP8.set(contents, ptr);
+          (growMemViews(), HEAP8).set(contents, ptr);
         }
       }
       return {
@@ -1720,27 +2383,6 @@ var asyncLoad = async url => {
 var FS_createDataFile = (...args) => FS.createDataFile(...args);
 
 var getUniqueRunDependency = id => id;
-
-var runDependencies = 0;
-
-var dependenciesFulfilled = null;
-
-var removeRunDependency = id => {
-  runDependencies--;
-  Module["monitorRunDependencies"]?.(runDependencies);
-  if (runDependencies == 0) {
-    if (dependenciesFulfilled) {
-      var callback = dependenciesFulfilled;
-      dependenciesFulfilled = null;
-      callback();
-    }
-  }
-};
-
-var addRunDependency = id => {
-  runDependencies++;
-  Module["monitorRunDependencies"]?.(runDependencies);
-};
 
 var FS_handledByPreloadPlugin = async (byteArray, fullname) => {
   // Ensure plugins are ready.
@@ -3377,7 +4019,7 @@ var FS = {
       if (!ptr) {
         throw new FS.ErrnoError(48);
       }
-      writeChunks(stream, HEAP8, ptr, length, position);
+      writeChunks(stream, (growMemViews(), HEAP8), ptr, length, position);
       return {
         ptr,
         allocated: true
@@ -3402,8 +4044,8 @@ var FS = {
    * @return {string}
    */ var UTF8ToString = (ptr, maxBytesToRead, ignoreNul) => {
   if (!ptr) return "";
-  var end = findStringEnd(HEAPU8, ptr, maxBytesToRead, ignoreNul);
-  return UTF8Decoder.decode(HEAPU8.subarray(ptr, end));
+  var end = findStringEnd((growMemViews(), HEAPU8), ptr, maxBytesToRead, ignoreNul);
+  return UTF8Decoder.decode((growMemViews(), HEAPU8).slice(ptr, end));
 };
 
 var SYSCALLS = {
@@ -3428,52 +4070,52 @@ var SYSCALLS = {
     return dir + "/" + path;
   },
   writeStat(buf, stat) {
-    HEAPU32[((buf) >> 2)] = stat.dev;
-    HEAPU32[(((buf) + (4)) >> 2)] = stat.mode;
-    HEAPU32[(((buf) + (8)) >> 2)] = stat.nlink;
-    HEAPU32[(((buf) + (12)) >> 2)] = stat.uid;
-    HEAPU32[(((buf) + (16)) >> 2)] = stat.gid;
-    HEAPU32[(((buf) + (20)) >> 2)] = stat.rdev;
+    (growMemViews(), HEAPU32)[((buf) >> 2)] = stat.dev;
+    (growMemViews(), HEAPU32)[(((buf) + (4)) >> 2)] = stat.mode;
+    (growMemViews(), HEAPU32)[(((buf) + (8)) >> 2)] = stat.nlink;
+    (growMemViews(), HEAPU32)[(((buf) + (12)) >> 2)] = stat.uid;
+    (growMemViews(), HEAPU32)[(((buf) + (16)) >> 2)] = stat.gid;
+    (growMemViews(), HEAPU32)[(((buf) + (20)) >> 2)] = stat.rdev;
     (tempI64 = [ stat.size >>> 0, (tempDouble = stat.size, (+(Math.abs(tempDouble))) >= 1 ? (tempDouble > 0 ? (+(Math.floor((tempDouble) / 4294967296))) >>> 0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble))) >>> 0)) / 4294967296))))) >>> 0) : 0) ], 
-    HEAP32[(((buf) + (24)) >> 2)] = tempI64[0], HEAP32[(((buf) + (28)) >> 2)] = tempI64[1]);
-    HEAP32[(((buf) + (32)) >> 2)] = 4096;
-    HEAP32[(((buf) + (36)) >> 2)] = stat.blocks;
+    (growMemViews(), HEAP32)[(((buf) + (24)) >> 2)] = tempI64[0], (growMemViews(), HEAP32)[(((buf) + (28)) >> 2)] = tempI64[1]);
+    (growMemViews(), HEAP32)[(((buf) + (32)) >> 2)] = 4096;
+    (growMemViews(), HEAP32)[(((buf) + (36)) >> 2)] = stat.blocks;
     var atime = stat.atime.getTime();
     var mtime = stat.mtime.getTime();
     var ctime = stat.ctime.getTime();
     (tempI64 = [ Math.floor(atime / 1e3) >>> 0, (tempDouble = Math.floor(atime / 1e3), 
     (+(Math.abs(tempDouble))) >= 1 ? (tempDouble > 0 ? (+(Math.floor((tempDouble) / 4294967296))) >>> 0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble))) >>> 0)) / 4294967296))))) >>> 0) : 0) ], 
-    HEAP32[(((buf) + (40)) >> 2)] = tempI64[0], HEAP32[(((buf) + (44)) >> 2)] = tempI64[1]);
-    HEAPU32[(((buf) + (48)) >> 2)] = (atime % 1e3) * 1e3 * 1e3;
+    (growMemViews(), HEAP32)[(((buf) + (40)) >> 2)] = tempI64[0], (growMemViews(), HEAP32)[(((buf) + (44)) >> 2)] = tempI64[1]);
+    (growMemViews(), HEAPU32)[(((buf) + (48)) >> 2)] = (atime % 1e3) * 1e3 * 1e3;
     (tempI64 = [ Math.floor(mtime / 1e3) >>> 0, (tempDouble = Math.floor(mtime / 1e3), 
     (+(Math.abs(tempDouble))) >= 1 ? (tempDouble > 0 ? (+(Math.floor((tempDouble) / 4294967296))) >>> 0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble))) >>> 0)) / 4294967296))))) >>> 0) : 0) ], 
-    HEAP32[(((buf) + (56)) >> 2)] = tempI64[0], HEAP32[(((buf) + (60)) >> 2)] = tempI64[1]);
-    HEAPU32[(((buf) + (64)) >> 2)] = (mtime % 1e3) * 1e3 * 1e3;
+    (growMemViews(), HEAP32)[(((buf) + (56)) >> 2)] = tempI64[0], (growMemViews(), HEAP32)[(((buf) + (60)) >> 2)] = tempI64[1]);
+    (growMemViews(), HEAPU32)[(((buf) + (64)) >> 2)] = (mtime % 1e3) * 1e3 * 1e3;
     (tempI64 = [ Math.floor(ctime / 1e3) >>> 0, (tempDouble = Math.floor(ctime / 1e3), 
     (+(Math.abs(tempDouble))) >= 1 ? (tempDouble > 0 ? (+(Math.floor((tempDouble) / 4294967296))) >>> 0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble))) >>> 0)) / 4294967296))))) >>> 0) : 0) ], 
-    HEAP32[(((buf) + (72)) >> 2)] = tempI64[0], HEAP32[(((buf) + (76)) >> 2)] = tempI64[1]);
-    HEAPU32[(((buf) + (80)) >> 2)] = (ctime % 1e3) * 1e3 * 1e3;
+    (growMemViews(), HEAP32)[(((buf) + (72)) >> 2)] = tempI64[0], (growMemViews(), HEAP32)[(((buf) + (76)) >> 2)] = tempI64[1]);
+    (growMemViews(), HEAPU32)[(((buf) + (80)) >> 2)] = (ctime % 1e3) * 1e3 * 1e3;
     (tempI64 = [ stat.ino >>> 0, (tempDouble = stat.ino, (+(Math.abs(tempDouble))) >= 1 ? (tempDouble > 0 ? (+(Math.floor((tempDouble) / 4294967296))) >>> 0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble))) >>> 0)) / 4294967296))))) >>> 0) : 0) ], 
-    HEAP32[(((buf) + (88)) >> 2)] = tempI64[0], HEAP32[(((buf) + (92)) >> 2)] = tempI64[1]);
+    (growMemViews(), HEAP32)[(((buf) + (88)) >> 2)] = tempI64[0], (growMemViews(), HEAP32)[(((buf) + (92)) >> 2)] = tempI64[1]);
     return 0;
   },
   writeStatFs(buf, stats) {
-    HEAPU32[(((buf) + (4)) >> 2)] = stats.bsize;
-    HEAPU32[(((buf) + (60)) >> 2)] = stats.bsize;
+    (growMemViews(), HEAPU32)[(((buf) + (4)) >> 2)] = stats.bsize;
+    (growMemViews(), HEAPU32)[(((buf) + (60)) >> 2)] = stats.bsize;
     (tempI64 = [ stats.blocks >>> 0, (tempDouble = stats.blocks, (+(Math.abs(tempDouble))) >= 1 ? (tempDouble > 0 ? (+(Math.floor((tempDouble) / 4294967296))) >>> 0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble))) >>> 0)) / 4294967296))))) >>> 0) : 0) ], 
-    HEAP32[(((buf) + (8)) >> 2)] = tempI64[0], HEAP32[(((buf) + (12)) >> 2)] = tempI64[1]);
+    (growMemViews(), HEAP32)[(((buf) + (8)) >> 2)] = tempI64[0], (growMemViews(), HEAP32)[(((buf) + (12)) >> 2)] = tempI64[1]);
     (tempI64 = [ stats.bfree >>> 0, (tempDouble = stats.bfree, (+(Math.abs(tempDouble))) >= 1 ? (tempDouble > 0 ? (+(Math.floor((tempDouble) / 4294967296))) >>> 0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble))) >>> 0)) / 4294967296))))) >>> 0) : 0) ], 
-    HEAP32[(((buf) + (16)) >> 2)] = tempI64[0], HEAP32[(((buf) + (20)) >> 2)] = tempI64[1]);
+    (growMemViews(), HEAP32)[(((buf) + (16)) >> 2)] = tempI64[0], (growMemViews(), HEAP32)[(((buf) + (20)) >> 2)] = tempI64[1]);
     (tempI64 = [ stats.bavail >>> 0, (tempDouble = stats.bavail, (+(Math.abs(tempDouble))) >= 1 ? (tempDouble > 0 ? (+(Math.floor((tempDouble) / 4294967296))) >>> 0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble))) >>> 0)) / 4294967296))))) >>> 0) : 0) ], 
-    HEAP32[(((buf) + (24)) >> 2)] = tempI64[0], HEAP32[(((buf) + (28)) >> 2)] = tempI64[1]);
+    (growMemViews(), HEAP32)[(((buf) + (24)) >> 2)] = tempI64[0], (growMemViews(), HEAP32)[(((buf) + (28)) >> 2)] = tempI64[1]);
     (tempI64 = [ stats.files >>> 0, (tempDouble = stats.files, (+(Math.abs(tempDouble))) >= 1 ? (tempDouble > 0 ? (+(Math.floor((tempDouble) / 4294967296))) >>> 0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble))) >>> 0)) / 4294967296))))) >>> 0) : 0) ], 
-    HEAP32[(((buf) + (32)) >> 2)] = tempI64[0], HEAP32[(((buf) + (36)) >> 2)] = tempI64[1]);
+    (growMemViews(), HEAP32)[(((buf) + (32)) >> 2)] = tempI64[0], (growMemViews(), HEAP32)[(((buf) + (36)) >> 2)] = tempI64[1]);
     (tempI64 = [ stats.ffree >>> 0, (tempDouble = stats.ffree, (+(Math.abs(tempDouble))) >= 1 ? (tempDouble > 0 ? (+(Math.floor((tempDouble) / 4294967296))) >>> 0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble))) >>> 0)) / 4294967296))))) >>> 0) : 0) ], 
-    HEAP32[(((buf) + (40)) >> 2)] = tempI64[0], HEAP32[(((buf) + (44)) >> 2)] = tempI64[1]);
-    HEAPU32[(((buf) + (48)) >> 2)] = stats.fsid;
-    HEAPU32[(((buf) + (64)) >> 2)] = stats.flags;
+    (growMemViews(), HEAP32)[(((buf) + (40)) >> 2)] = tempI64[0], (growMemViews(), HEAP32)[(((buf) + (44)) >> 2)] = tempI64[1]);
+    (growMemViews(), HEAPU32)[(((buf) + (48)) >> 2)] = stats.fsid;
+    (growMemViews(), HEAPU32)[(((buf) + (64)) >> 2)] = stats.flags;
     // ST_NOSUID
-    HEAPU32[(((buf) + (56)) >> 2)] = stats.namelen;
+    (growMemViews(), HEAPU32)[(((buf) + (56)) >> 2)] = stats.namelen;
   },
   doMsync(addr, stream, len, flags, offset) {
     if (!FS.isFile(stream.node.mode)) {
@@ -3483,7 +4125,7 @@ var SYSCALLS = {
       // MAP_PRIVATE calls need not to be synced back to underlying fs
       return 0;
     }
-    var buffer = HEAPU8.slice(addr, addr + len);
+    var buffer = (growMemViews(), HEAPU8).slice(addr, addr + len);
     FS.msync(stream, buffer, offset, len, flags);
   },
   getStreamFromFD(fd) {
@@ -3498,6 +4140,7 @@ var SYSCALLS = {
 };
 
 function ___syscall_dup(fd) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(3, 0, 1, fd);
   try {
     var old = SYSCALLS.getStreamFromFD(fd);
     return FS.dupStream(old).fd;
@@ -3508,6 +4151,7 @@ function ___syscall_dup(fd) {
 }
 
 function ___syscall_faccessat(dirfd, path, amode, flags) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(4, 0, 1, dirfd, path, amode, flags);
   try {
     path = SYSCALLS.getStr(path);
     path = SYSCALLS.calculateAt(dirfd, path);
@@ -3538,7 +4182,7 @@ function ___syscall_faccessat(dirfd, path, amode, flags) {
 
 var syscallGetVarargI = () => {
   // the `+` prepended here is necessary to convince the JSCompiler that varargs is indeed a number.
-  var ret = HEAP32[((+SYSCALLS.varargs) >> 2)];
+  var ret = (growMemViews(), HEAP32)[((+SYSCALLS.varargs) >> 2)];
   SYSCALLS.varargs += 4;
   return ret;
 };
@@ -3546,6 +4190,7 @@ var syscallGetVarargI = () => {
 var syscallGetVarargP = syscallGetVarargI;
 
 function ___syscall_fcntl64(fd, cmd, varargs) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(5, 0, 1, fd, cmd, varargs);
   SYSCALLS.varargs = varargs;
   try {
     var stream = SYSCALLS.getStreamFromFD(fd);
@@ -3584,7 +4229,7 @@ function ___syscall_fcntl64(fd, cmd, varargs) {
         var arg = syscallGetVarargP();
         var offset = 0;
         // We're always unlocked.
-        HEAP16[(((arg) + (offset)) >> 1)] = 2;
+        (growMemViews(), HEAP16)[(((arg) + (offset)) >> 1)] = 2;
         return 0;
       }
 
@@ -3604,6 +4249,7 @@ function ___syscall_fcntl64(fd, cmd, varargs) {
 }
 
 function ___syscall_fstat64(fd, buf) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(6, 0, 1, fd, buf);
   try {
     return SYSCALLS.writeStat(buf, FS.fstat(fd));
   } catch (e) {
@@ -3615,6 +4261,7 @@ function ___syscall_fstat64(fd, buf) {
 var convertI32PairToI53Checked = (lo, hi) => ((hi + 2097152) >>> 0 < 4194305 - !!lo) ? (lo >>> 0) + hi * 4294967296 : NaN;
 
 function ___syscall_ftruncate64(fd, length_low, length_high) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(7, 0, 1, fd, length_low, length_high);
   var length = convertI32PairToI53Checked(length_low, length_high);
   try {
     if (isNaN(length)) return -61;
@@ -3626,9 +4273,11 @@ function ___syscall_ftruncate64(fd, length_low, length_high) {
   }
 }
 
-var stringToUTF8 = (str, outPtr, maxBytesToWrite) => stringToUTF8Array(str, HEAPU8, outPtr, maxBytesToWrite);
+var stringToUTF8 = (str, outPtr, maxBytesToWrite) => stringToUTF8Array(str, (growMemViews(), 
+HEAPU8), outPtr, maxBytesToWrite);
 
 function ___syscall_getdents64(fd, dirp, count) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(8, 0, 1, fd, dirp, count);
   try {
     var stream = SYSCALLS.getStreamFromFD(fd);
     stream.getdents ||= FS.readdir(stream.path);
@@ -3669,12 +4318,13 @@ function ___syscall_getdents64(fd, dirp, count) {
         8;
       }
       (tempI64 = [ id >>> 0, (tempDouble = id, (+(Math.abs(tempDouble))) >= 1 ? (tempDouble > 0 ? (+(Math.floor((tempDouble) / 4294967296))) >>> 0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble))) >>> 0)) / 4294967296))))) >>> 0) : 0) ], 
-      HEAP32[((dirp + pos) >> 2)] = tempI64[0], HEAP32[(((dirp + pos) + (4)) >> 2)] = tempI64[1]);
+      (growMemViews(), HEAP32)[((dirp + pos) >> 2)] = tempI64[0], (growMemViews(), HEAP32)[(((dirp + pos) + (4)) >> 2)] = tempI64[1]);
       (tempI64 = [ (idx + 1) * struct_size >>> 0, (tempDouble = (idx + 1) * struct_size, 
       (+(Math.abs(tempDouble))) >= 1 ? (tempDouble > 0 ? (+(Math.floor((tempDouble) / 4294967296))) >>> 0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble))) >>> 0)) / 4294967296))))) >>> 0) : 0) ], 
-      HEAP32[(((dirp + pos) + (8)) >> 2)] = tempI64[0], HEAP32[(((dirp + pos) + (12)) >> 2)] = tempI64[1]);
-      HEAP16[(((dirp + pos) + (16)) >> 1)] = 280;
-      HEAP8[(dirp + pos) + (18)] = type;
+      (growMemViews(), HEAP32)[(((dirp + pos) + (8)) >> 2)] = tempI64[0], (growMemViews(), 
+      HEAP32)[(((dirp + pos) + (12)) >> 2)] = tempI64[1]);
+      (growMemViews(), HEAP16)[(((dirp + pos) + (16)) >> 1)] = 280;
+      (growMemViews(), HEAP8)[(dirp + pos) + (18)] = type;
       stringToUTF8(name, dirp + pos + 19, 256);
       pos += struct_size;
     }
@@ -3687,6 +4337,7 @@ function ___syscall_getdents64(fd, dirp, count) {
 }
 
 function ___syscall_ioctl(fd, op, varargs) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(9, 0, 1, fd, op, varargs);
   SYSCALLS.varargs = varargs;
   try {
     var stream = SYSCALLS.getStreamFromFD(fd);
@@ -3703,12 +4354,12 @@ function ___syscall_ioctl(fd, op, varargs) {
         if (stream.tty.ops.ioctl_tcgets) {
           var termios = stream.tty.ops.ioctl_tcgets(stream);
           var argp = syscallGetVarargP();
-          HEAP32[((argp) >> 2)] = termios.c_iflag || 0;
-          HEAP32[(((argp) + (4)) >> 2)] = termios.c_oflag || 0;
-          HEAP32[(((argp) + (8)) >> 2)] = termios.c_cflag || 0;
-          HEAP32[(((argp) + (12)) >> 2)] = termios.c_lflag || 0;
+          (growMemViews(), HEAP32)[((argp) >> 2)] = termios.c_iflag || 0;
+          (growMemViews(), HEAP32)[(((argp) + (4)) >> 2)] = termios.c_oflag || 0;
+          (growMemViews(), HEAP32)[(((argp) + (8)) >> 2)] = termios.c_cflag || 0;
+          (growMemViews(), HEAP32)[(((argp) + (12)) >> 2)] = termios.c_lflag || 0;
           for (var i = 0; i < 32; i++) {
-            HEAP8[(argp + i) + (17)] = termios.c_cc[i] || 0;
+            (growMemViews(), HEAP8)[(argp + i) + (17)] = termios.c_cc[i] || 0;
           }
           return 0;
         }
@@ -3730,13 +4381,13 @@ function ___syscall_ioctl(fd, op, varargs) {
         if (!stream.tty) return -59;
         if (stream.tty.ops.ioctl_tcsets) {
           var argp = syscallGetVarargP();
-          var c_iflag = HEAP32[((argp) >> 2)];
-          var c_oflag = HEAP32[(((argp) + (4)) >> 2)];
-          var c_cflag = HEAP32[(((argp) + (8)) >> 2)];
-          var c_lflag = HEAP32[(((argp) + (12)) >> 2)];
+          var c_iflag = (growMemViews(), HEAP32)[((argp) >> 2)];
+          var c_oflag = (growMemViews(), HEAP32)[(((argp) + (4)) >> 2)];
+          var c_cflag = (growMemViews(), HEAP32)[(((argp) + (8)) >> 2)];
+          var c_lflag = (growMemViews(), HEAP32)[(((argp) + (12)) >> 2)];
           var c_cc = [];
           for (var i = 0; i < 32; i++) {
-            c_cc.push(HEAP8[(argp + i) + (17)]);
+            c_cc.push((growMemViews(), HEAP8)[(argp + i) + (17)]);
           }
           return stream.tty.ops.ioctl_tcsets(stream.tty, op, {
             c_iflag,
@@ -3753,7 +4404,7 @@ function ___syscall_ioctl(fd, op, varargs) {
       {
         if (!stream.tty) return -59;
         var argp = syscallGetVarargP();
-        HEAP32[((argp) >> 2)] = 0;
+        (growMemViews(), HEAP32)[((argp) >> 2)] = 0;
         return 0;
       }
 
@@ -3778,8 +4429,8 @@ function ___syscall_ioctl(fd, op, varargs) {
         if (stream.tty.ops.ioctl_tiocgwinsz) {
           var winsize = stream.tty.ops.ioctl_tiocgwinsz(stream.tty);
           var argp = syscallGetVarargP();
-          HEAP16[((argp) >> 1)] = winsize[0];
-          HEAP16[(((argp) + (2)) >> 1)] = winsize[1];
+          (growMemViews(), HEAP16)[((argp) >> 1)] = winsize[0];
+          (growMemViews(), HEAP16)[(((argp) + (2)) >> 1)] = winsize[1];
         }
         return 0;
       }
@@ -3809,6 +4460,7 @@ function ___syscall_ioctl(fd, op, varargs) {
 }
 
 function ___syscall_lstat64(path, buf) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(10, 0, 1, path, buf);
   try {
     path = SYSCALLS.getStr(path);
     return SYSCALLS.writeStat(buf, FS.lstat(path));
@@ -3819,6 +4471,7 @@ function ___syscall_lstat64(path, buf) {
 }
 
 function ___syscall_newfstatat(dirfd, path, buf, flags) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(11, 0, 1, dirfd, path, buf, flags);
   try {
     path = SYSCALLS.getStr(path);
     var nofollow = flags & 256;
@@ -3833,6 +4486,7 @@ function ___syscall_newfstatat(dirfd, path, buf, flags) {
 }
 
 function ___syscall_openat(dirfd, path, flags, varargs) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(12, 0, 1, dirfd, path, flags, varargs);
   SYSCALLS.varargs = varargs;
   try {
     path = SYSCALLS.getStr(path);
@@ -3846,6 +4500,7 @@ function ___syscall_openat(dirfd, path, flags, varargs) {
 }
 
 function ___syscall_stat64(path, buf) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(13, 0, 1, path, buf);
   try {
     path = SYSCALLS.getStr(path);
     return SYSCALLS.writeStat(buf, FS.stat(path));
@@ -3862,7 +4517,7 @@ var __embind_register_bigint = (primitiveType, name, size, minRange, maxRange) =
 var AsciiToString = ptr => {
   var str = "";
   while (1) {
-    var ch = HEAPU8[ptr++];
+    var ch = (growMemViews(), HEAPU8)[ptr++];
     if (!ch) return str;
     str += String.fromCharCode(ch);
   }
@@ -3923,7 +4578,7 @@ var throwBindingError = message => {
       return o ? trueValue : falseValue;
     },
     readValueFromPointer: function(pointer) {
-      return this.fromWireType(HEAPU8[pointer]);
+      return this.fromWireType((growMemViews(), HEAPU8)[pointer]);
     },
     destructorFunction: null
   });
@@ -4290,7 +4945,7 @@ var embindRepr = v => {
 }
 
 /** @suppress {globalThis} */ function readPointer(pointer) {
-  return this.fromWireType(HEAPU32[((pointer) >> 2)]);
+  return this.fromWireType((growMemViews(), HEAPU32)[((pointer) >> 2)]);
 }
 
 var downcastPointer = (ptr, ptrClass, desiredClass) => {
@@ -4493,16 +5148,6 @@ var dynCallLegacy = (sig, ptr, args) => {
   sig = sig.replace(/p/g, "i");
   var f = dynCalls[sig];
   return f(ptr, ...args);
-};
-
-var wasmTableMirror = [];
-
-var getWasmTableEntry = funcPtr => {
-  var func = wasmTableMirror[funcPtr];
-  if (!func) {
-    /** @suppress {checkTypes} */ wasmTableMirror[funcPtr] = func = wasmTable.get(funcPtr);
-  }
-  return func;
 };
 
 var dynCall = (sig, ptr, args = [], promising = false) => {
@@ -4748,7 +5393,7 @@ var heap32VectorToArray = (count, firstElement) => {
   for (var i = 0; i < count; i++) {
     // TODO(https://github.com/emscripten-core/emscripten/issues/17310):
     // Find a way to hoist the `>> 2` or `>> 3` out of this loop.
-    array.push(HEAPU32[(((firstElement) + (i * 4)) >> 2)]);
+    array.push((growMemViews(), HEAPU32)[(((firstElement) + (i * 4)) >> 2)]);
   }
   return array;
 };
@@ -4949,23 +5594,23 @@ var enumReadValueFromPointer = (name, width, signed) => {
   switch (width) {
    case 1:
     return signed ? function(pointer) {
-      return this.fromWireType(HEAP8[pointer]);
+      return this.fromWireType((growMemViews(), HEAP8)[pointer]);
     } : function(pointer) {
-      return this.fromWireType(HEAPU8[pointer]);
+      return this.fromWireType((growMemViews(), HEAPU8)[pointer]);
     };
 
    case 2:
     return signed ? function(pointer) {
-      return this.fromWireType(HEAP16[((pointer) >> 1)]);
+      return this.fromWireType((growMemViews(), HEAP16)[((pointer) >> 1)]);
     } : function(pointer) {
-      return this.fromWireType(HEAPU16[((pointer) >> 1)]);
+      return this.fromWireType((growMemViews(), HEAPU16)[((pointer) >> 1)]);
     };
 
    case 4:
     return signed ? function(pointer) {
-      return this.fromWireType(HEAP32[((pointer) >> 2)]);
+      return this.fromWireType((growMemViews(), HEAP32)[((pointer) >> 2)]);
     } : function(pointer) {
-      return this.fromWireType(HEAPU32[((pointer) >> 2)]);
+      return this.fromWireType((growMemViews(), HEAPU32)[((pointer) >> 2)]);
     };
 
    default:
@@ -5095,12 +5740,12 @@ var floatReadValueFromPointer = (name, width) => {
   switch (width) {
    case 4:
     return function(pointer) {
-      return this.fromWireType(HEAPF32[((pointer) >> 2)]);
+      return this.fromWireType((growMemViews(), HEAPF32)[((pointer) >> 2)]);
     };
 
    case 8:
     return function(pointer) {
-      return this.fromWireType(HEAPF64[((pointer) >> 3)]);
+      return this.fromWireType((growMemViews(), HEAPF64)[((pointer) >> 3)]);
     };
 
    default:
@@ -5138,13 +5783,16 @@ var integerReadValueFromPointer = (name, width, signed) => {
   // integers are quite common, so generate very specialized functions
   switch (width) {
    case 1:
-    return signed ? pointer => HEAP8[pointer] : pointer => HEAPU8[pointer];
+    return signed ? pointer => (growMemViews(), HEAP8)[pointer] : pointer => (growMemViews(), 
+    HEAPU8)[pointer];
 
    case 2:
-    return signed ? pointer => HEAP16[((pointer) >> 1)] : pointer => HEAPU16[((pointer) >> 1)];
+    return signed ? pointer => (growMemViews(), HEAP16)[((pointer) >> 1)] : pointer => (growMemViews(), 
+    HEAPU16)[((pointer) >> 1)];
 
    case 4:
-    return signed ? pointer => HEAP32[((pointer) >> 2)] : pointer => HEAPU32[((pointer) >> 2)];
+    return signed ? pointer => (growMemViews(), HEAP32)[((pointer) >> 2)] : pointer => (growMemViews(), 
+    HEAPU32)[((pointer) >> 2)];
 
    default:
     throw new TypeError(`invalid integer width (${width}): ${name}`);
@@ -5214,9 +5862,9 @@ var __embind_register_memory_view = (rawType, dataTypeIndex, name) => {
   var typeMapping = [ Int8Array, Uint8Array, Int16Array, Uint16Array, Int32Array, Uint32Array, Float32Array, Float64Array ];
   var TA = typeMapping[dataTypeIndex];
   function decodeMemoryView(handle) {
-    var size = HEAPU32[((handle) >> 2)];
-    var data = HEAPU32[(((handle) + (4)) >> 2)];
-    return new TA(HEAP8.buffer, data, size);
+    var size = (growMemViews(), HEAPU32)[((handle) >> 2)];
+    var data = (growMemViews(), HEAPU32)[(((handle) + (4)) >> 2)];
+    return new TA((growMemViews(), HEAP8).buffer, data, size);
   }
   name = AsciiToString(name);
   registerType(rawType, {
@@ -5244,7 +5892,7 @@ var __embind_register_std_string = (rawType, name) => {
     // For some method names we use string keys here since they are part of
     // the public/external API and/or used by the runtime-generated code.
     fromWireType(value) {
-      var length = HEAPU32[((value) >> 2)];
+      var length = (growMemViews(), HEAPU32)[((value) >> 2)];
       var payload = value + 4;
       var str;
       if (stdStringIsUTF8) {
@@ -5252,7 +5900,7 @@ var __embind_register_std_string = (rawType, name) => {
       } else {
         str = "";
         for (var i = 0; i < length; ++i) {
-          str += String.fromCharCode(HEAPU8[payload + i]);
+          str += String.fromCharCode((growMemViews(), HEAPU8)[payload + i]);
         }
       }
       _free(value);
@@ -5276,7 +5924,7 @@ var __embind_register_std_string = (rawType, name) => {
       // assumes POINTER_SIZE alignment
       var base = _malloc(4 + length + 1);
       var ptr = base + 4;
-      HEAPU32[((base) >> 2)] = length;
+      (growMemViews(), HEAPU32)[((base) >> 2)] = length;
       if (valueIsOfTypeString) {
         if (stdStringIsUTF8) {
           stringToUTF8(value, ptr, length + 1);
@@ -5287,11 +5935,11 @@ var __embind_register_std_string = (rawType, name) => {
               _free(base);
               throwBindingError("String has UTF-16 code units that do not fit in 8 bits");
             }
-            HEAPU8[ptr + i] = charCode;
+            (growMemViews(), HEAPU8)[ptr + i] = charCode;
           }
         }
       } else {
-        HEAPU8.set(value, ptr);
+        (growMemViews(), HEAPU8).set(value, ptr);
       }
       if (destructors !== null) {
         destructors.push(_free, base);
@@ -5309,8 +5957,8 @@ var UTF16Decoder = new TextDecoder("utf-16le");
 
 var UTF16ToString = (ptr, maxBytesToRead, ignoreNul) => {
   var idx = ((ptr) >> 1);
-  var endIdx = findStringEnd(HEAPU16, idx, maxBytesToRead / 2, ignoreNul);
-  return UTF16Decoder.decode(HEAPU16.subarray(idx, endIdx));
+  var endIdx = findStringEnd((growMemViews(), HEAPU16), idx, maxBytesToRead / 2, ignoreNul);
+  return UTF16Decoder.decode((growMemViews(), HEAPU16).slice(idx, endIdx));
 };
 
 var stringToUTF16 = (str, outPtr, maxBytesToWrite) => {
@@ -5325,11 +5973,11 @@ var stringToUTF16 = (str, outPtr, maxBytesToWrite) => {
     // charCodeAt returns a UTF-16 encoded code unit, so it can be directly written to the HEAP.
     var codeUnit = str.charCodeAt(i);
     // possibly a lead surrogate
-    HEAP16[((outPtr) >> 1)] = codeUnit;
+    (growMemViews(), HEAP16)[((outPtr) >> 1)] = codeUnit;
     outPtr += 2;
   }
   // Null-terminate the pointer to the HEAP.
-  HEAP16[((outPtr) >> 1)] = 0;
+  (growMemViews(), HEAP16)[((outPtr) >> 1)] = 0;
   return outPtr - startPtr;
 };
 
@@ -5341,7 +5989,7 @@ var UTF32ToString = (ptr, maxBytesToRead, ignoreNul) => {
   // If maxBytesToRead is not passed explicitly, it will be undefined, and this
   // will always evaluate to true. This saves on code size.
   for (var i = 0; !(i >= maxBytesToRead / 4); i++) {
-    var utf32 = HEAPU32[startIdx + i];
+    var utf32 = (growMemViews(), HEAPU32)[startIdx + i];
     if (!utf32 && !ignoreNul) break;
     str += String.fromCodePoint(utf32);
   }
@@ -5361,12 +6009,12 @@ var stringToUTF32 = (str, outPtr, maxBytesToWrite) => {
     if (codePoint > 65535) {
       i++;
     }
-    HEAP32[((outPtr) >> 2)] = codePoint;
+    (growMemViews(), HEAP32)[((outPtr) >> 2)] = codePoint;
     outPtr += 4;
     if (outPtr + 4 > endPtr) break;
   }
   // Null-terminate the pointer to the HEAP.
-  HEAP32[((outPtr) >> 2)] = 0;
+  (growMemViews(), HEAP32)[((outPtr) >> 2)] = 0;
   return outPtr - startPtr;
 };
 
@@ -5400,7 +6048,7 @@ var __embind_register_std_wstring = (rawType, charSize, name) => {
     name,
     fromWireType: value => {
       // Code mostly taken from _embind_register_std_string fromWireType
-      var length = HEAPU32[((value) >> 2)];
+      var length = (growMemViews(), HEAPU32)[((value) >> 2)];
       var str = decodeString(value + 4, length * charSize, true);
       _free(value);
       return str;
@@ -5412,7 +6060,7 @@ var __embind_register_std_wstring = (rawType, charSize, name) => {
       // assumes POINTER_SIZE alignment
       var length = lengthBytesUTF(value);
       var ptr = _malloc(4 + length + charSize);
-      HEAPU32[((ptr) >> 2)] = length / charSize;
+      (growMemViews(), HEAPU32)[((ptr) >> 2)] = length / charSize;
       encodeString(value, ptr + 4, length + charSize);
       if (destructors !== null) {
         destructors.push(_free, ptr);
@@ -5438,6 +6086,117 @@ var __embind_register_void = (rawType, name) => {
   });
 };
 
+var __emscripten_init_main_thread_js = tb => {
+  // Pass the thread address to the native code where they are stored in wasm
+  // globals which act as a form of TLS. Global constructors trying
+  // to access this value will read the wrong value, but that is UB anyway.
+  __emscripten_thread_init(tb, /*is_main=*/ !ENVIRONMENT_IS_WORKER, /*is_runtime=*/ 1, /*can_block=*/ !ENVIRONMENT_IS_WEB, /*default_stacksize=*/ 65536, /*start_profiling=*/ false);
+  PThread.threadInitTLS();
+};
+
+var waitAsyncPolyfilled = (!Atomics.waitAsync || (globalThis.navigator?.userAgent && Number((navigator.userAgent.match(/Chrom(e|ium)\/([0-9]+)\./) || [])[2]) < 91));
+
+var __emscripten_thread_mailbox_await = pthread_ptr => {
+  if (!waitAsyncPolyfilled) {
+    // Wait on the pthread's initial self-pointer field because it is easy and
+    // safe to access from sending threads that need to notify the waiting
+    // thread.
+    // Note: Under wasm64 only the low 32-bit of the pthread_ptr are
+    // read/compared here, but we don't actually care about the exact values
+    // here as long as they match.
+    var wait = Atomics.waitAsync((growMemViews(), HEAP32), ((pthread_ptr) >> 2), pthread_ptr);
+    wait.value.then(checkMailbox);
+    var waitingAsync = pthread_ptr + 120;
+    Atomics.store((growMemViews(), HEAP32), ((waitingAsync) >> 2), 1);
+  }
+};
+
+var checkMailbox = () => callUserCallback(() => {
+  // Only check the mailbox if we have a live pthread runtime. We implement
+  // pthread_self to return 0 if there is no live runtime.
+  // TODO(https://github.com/emscripten-core/emscripten/issues/25076):
+  // Is this check still needed?  `callUserCallback` is supposed to
+  // ensure the runtime is alive, and if `_pthread_self` is NULL then the
+  // runtime certainly is *not* alive, so this should be a redundant check.
+  var pthread_ptr = _pthread_self();
+  if (pthread_ptr) {
+    // If we are using Atomics.waitAsync as our notification mechanism, wait
+    // for a notification before processing the mailbox to avoid missing any
+    // work that could otherwise arrive after we've finished processing the
+    // mailbox and before we're ready for the next notification.
+    __emscripten_thread_mailbox_await(pthread_ptr);
+    __emscripten_check_mailbox();
+  }
+});
+
+var __emscripten_notify_mailbox_postmessage = (targetThread, currThreadId) => {
+  if (targetThread == currThreadId) {
+    setTimeout(checkMailbox);
+  } else if (ENVIRONMENT_IS_PTHREAD) {
+    postMessage({
+      targetThread,
+      cmd: "checkMailbox"
+    });
+  } else {
+    var worker = PThread.pthreads[targetThread];
+    if (!worker) {
+      return;
+    }
+    worker.postMessage({
+      cmd: "checkMailbox"
+    });
+  }
+};
+
+var proxiedJSCallArgs = [];
+
+var __emscripten_receive_on_main_thread_js = (funcIndex, emAsmAddr, callingThread, bufSize, args, ctx, ctxArgs) => {
+  // Sometimes we need to backproxy events to the calling thread (e.g.
+  // HTML5 DOM events handlers such as
+  // emscripten_set_mousemove_callback()), so keep track in a globally
+  // accessible variable about the thread that initiated the proxying.
+  proxiedJSCallArgs.length = 0;
+  var b = ((args) >> 3);
+  var end = ((args + bufSize) >> 3);
+  while (b < end) {
+    var arg = (growMemViews(), HEAPF64)[b++];
+    proxiedJSCallArgs.push(arg);
+  }
+  // Proxied JS library funcs use funcIndex and EM_ASM functions use emAsmAddr
+  var func = emAsmAddr ? ASM_CONSTS[emAsmAddr] : proxiedFunctionTable[funcIndex];
+  PThread.currentProxiedOperationCallerThread = callingThread;
+  var rtn = func(...proxiedJSCallArgs);
+  PThread.currentProxiedOperationCallerThread = 0;
+  if (ctx) {
+    rtn.then(rtn => __emscripten_run_js_on_main_thread_done(ctx, ctxArgs, rtn));
+    return;
+  }
+  return rtn;
+};
+
+var __emscripten_thread_cleanup = thread => {
+  // Called when a thread needs to be cleaned up so it can be reused.
+  // A thread is considered reusable when it either returns from its
+  // entry point, calls pthread_exit, or acts upon a cancellation.
+  // Detached threads are responsible for calling this themselves,
+  // otherwise pthread_join is responsible for calling this.
+  if (!ENVIRONMENT_IS_PTHREAD) cleanupThread(thread); else postMessage({
+    cmd: "cleanupThread",
+    thread
+  });
+};
+
+var __emscripten_thread_set_strongref = thread => {
+  // Called when a thread needs to be strongly referenced.
+  // Currently only used for:
+  // - keeping the "main" thread alive in PROXY_TO_PTHREAD mode;
+  // - crashed threads that need to propagate the uncaught exception
+  //   back to the main thread.
+  if (ENVIRONMENT_IS_NODE) {
+    PThread.pthreads[thread].ref();
+  }
+};
+
 var emval_methodCallers = [];
 
 var emval_addMethodCaller = caller => {
@@ -5449,7 +6208,7 @@ var emval_addMethodCaller = caller => {
 var emval_lookupTypes = (argCount, argTypes) => {
   var a = new Array(argCount);
   for (var i = 0; i < argCount; ++i) {
-    a[i] = requireRegisteredType(HEAPU32[(((argTypes) + (i * 4)) >> 2)], `parameter ${i}`);
+    a[i] = requireRegisteredType((growMemViews(), HEAPU32)[(((argTypes) + (i * 4)) >> 2)], `parameter ${i}`);
   }
   return a;
 };
@@ -5459,7 +6218,7 @@ var emval_returnValue = (toReturnWire, destructorsRef, handle) => {
   var result = toReturnWire(destructors, handle);
   if (destructors.length) {
     // void, primitives and any other types w/o destructors don't need to allocate a handle
-    HEAPU32[((destructorsRef) >> 2)] = Emval.toHandle(destructors);
+    (growMemViews(), HEAPU32)[((destructorsRef) >> 2)] = Emval.toHandle(destructors);
   }
   return result;
 };
@@ -5564,16 +6323,16 @@ var __emval_typeof = handle => {
 function __gmtime_js(time_low, time_high, tmPtr) {
   var time = convertI32PairToI53Checked(time_low, time_high);
   var date = new Date(time * 1e3);
-  HEAP32[((tmPtr) >> 2)] = date.getUTCSeconds();
-  HEAP32[(((tmPtr) + (4)) >> 2)] = date.getUTCMinutes();
-  HEAP32[(((tmPtr) + (8)) >> 2)] = date.getUTCHours();
-  HEAP32[(((tmPtr) + (12)) >> 2)] = date.getUTCDate();
-  HEAP32[(((tmPtr) + (16)) >> 2)] = date.getUTCMonth();
-  HEAP32[(((tmPtr) + (20)) >> 2)] = date.getUTCFullYear() - 1900;
-  HEAP32[(((tmPtr) + (24)) >> 2)] = date.getUTCDay();
+  (growMemViews(), HEAP32)[((tmPtr) >> 2)] = date.getUTCSeconds();
+  (growMemViews(), HEAP32)[(((tmPtr) + (4)) >> 2)] = date.getUTCMinutes();
+  (growMemViews(), HEAP32)[(((tmPtr) + (8)) >> 2)] = date.getUTCHours();
+  (growMemViews(), HEAP32)[(((tmPtr) + (12)) >> 2)] = date.getUTCDate();
+  (growMemViews(), HEAP32)[(((tmPtr) + (16)) >> 2)] = date.getUTCMonth();
+  (growMemViews(), HEAP32)[(((tmPtr) + (20)) >> 2)] = date.getUTCFullYear() - 1900;
+  (growMemViews(), HEAP32)[(((tmPtr) + (24)) >> 2)] = date.getUTCDay();
   var start = Date.UTC(date.getUTCFullYear(), 0, 1, 0, 0, 0, 0);
   var yday = ((date.getTime() - start) / (1e3 * 60 * 60 * 24)) | 0;
-  HEAP32[(((tmPtr) + (28)) >> 2)] = yday;
+  (growMemViews(), HEAP32)[(((tmPtr) + (28)) >> 2)] = yday;
 }
 
 var isLeapYear = year => year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
@@ -5593,33 +6352,36 @@ var ydayFromDate = date => {
 function __localtime_js(time_low, time_high, tmPtr) {
   var time = convertI32PairToI53Checked(time_low, time_high);
   var date = new Date(time * 1e3);
-  HEAP32[((tmPtr) >> 2)] = date.getSeconds();
-  HEAP32[(((tmPtr) + (4)) >> 2)] = date.getMinutes();
-  HEAP32[(((tmPtr) + (8)) >> 2)] = date.getHours();
-  HEAP32[(((tmPtr) + (12)) >> 2)] = date.getDate();
-  HEAP32[(((tmPtr) + (16)) >> 2)] = date.getMonth();
-  HEAP32[(((tmPtr) + (20)) >> 2)] = date.getFullYear() - 1900;
-  HEAP32[(((tmPtr) + (24)) >> 2)] = date.getDay();
+  (growMemViews(), HEAP32)[((tmPtr) >> 2)] = date.getSeconds();
+  (growMemViews(), HEAP32)[(((tmPtr) + (4)) >> 2)] = date.getMinutes();
+  (growMemViews(), HEAP32)[(((tmPtr) + (8)) >> 2)] = date.getHours();
+  (growMemViews(), HEAP32)[(((tmPtr) + (12)) >> 2)] = date.getDate();
+  (growMemViews(), HEAP32)[(((tmPtr) + (16)) >> 2)] = date.getMonth();
+  (growMemViews(), HEAP32)[(((tmPtr) + (20)) >> 2)] = date.getFullYear() - 1900;
+  (growMemViews(), HEAP32)[(((tmPtr) + (24)) >> 2)] = date.getDay();
   var yday = ydayFromDate(date) | 0;
-  HEAP32[(((tmPtr) + (28)) >> 2)] = yday;
-  HEAP32[(((tmPtr) + (36)) >> 2)] = -(date.getTimezoneOffset() * 60);
+  (growMemViews(), HEAP32)[(((tmPtr) + (28)) >> 2)] = yday;
+  (growMemViews(), HEAP32)[(((tmPtr) + (36)) >> 2)] = -(date.getTimezoneOffset() * 60);
   // Attention: DST is in December in South, and some regions don't have DST at all.
   var start = new Date(date.getFullYear(), 0, 1);
   var summerOffset = new Date(date.getFullYear(), 6, 1).getTimezoneOffset();
   var winterOffset = start.getTimezoneOffset();
   var dst = (summerOffset != winterOffset && date.getTimezoneOffset() == Math.min(winterOffset, summerOffset)) | 0;
-  HEAP32[(((tmPtr) + (32)) >> 2)] = dst;
+  (growMemViews(), HEAP32)[(((tmPtr) + (32)) >> 2)] = dst;
 }
 
 var setTempRet0 = val => __emscripten_tempret_set(val);
 
 var __mktime_js = function(tmPtr) {
   var ret = (() => {
-    var date = new Date(HEAP32[(((tmPtr) + (20)) >> 2)] + 1900, HEAP32[(((tmPtr) + (16)) >> 2)], HEAP32[(((tmPtr) + (12)) >> 2)], HEAP32[(((tmPtr) + (8)) >> 2)], HEAP32[(((tmPtr) + (4)) >> 2)], HEAP32[((tmPtr) >> 2)], 0);
+    var date = new Date((growMemViews(), HEAP32)[(((tmPtr) + (20)) >> 2)] + 1900, (growMemViews(), 
+    HEAP32)[(((tmPtr) + (16)) >> 2)], (growMemViews(), HEAP32)[(((tmPtr) + (12)) >> 2)], (growMemViews(), 
+    HEAP32)[(((tmPtr) + (8)) >> 2)], (growMemViews(), HEAP32)[(((tmPtr) + (4)) >> 2)], (growMemViews(), 
+    HEAP32)[((tmPtr) >> 2)], 0);
     // There's an ambiguous hour when the time goes back; the tm_isdst field is
     // used to disambiguate it.  Date() basically guesses, so we fix it up if it
     // guessed wrong, or fill in tm_isdst with the guess if it's -1.
-    var dst = HEAP32[(((tmPtr) + (32)) >> 2)];
+    var dst = (growMemViews(), HEAP32)[(((tmPtr) + (32)) >> 2)];
     var guessedOffset = date.getTimezoneOffset();
     var start = new Date(date.getFullYear(), 0, 1);
     var summerOffset = new Date(date.getFullYear(), 6, 1).getTimezoneOffset();
@@ -5628,23 +6390,23 @@ var __mktime_js = function(tmPtr) {
     // DST is in December in South
     if (dst < 0) {
       // Attention: some regions don't have DST at all.
-      HEAP32[(((tmPtr) + (32)) >> 2)] = Number(summerOffset != winterOffset && dstOffset == guessedOffset);
+      (growMemViews(), HEAP32)[(((tmPtr) + (32)) >> 2)] = Number(summerOffset != winterOffset && dstOffset == guessedOffset);
     } else if ((dst > 0) != (dstOffset == guessedOffset)) {
       var nonDstOffset = Math.max(winterOffset, summerOffset);
       var trueOffset = dst > 0 ? dstOffset : nonDstOffset;
       // Don't try setMinutes(date.getMinutes() + ...) -- it's messed up.
       date.setTime(date.getTime() + (trueOffset - guessedOffset) * 6e4);
     }
-    HEAP32[(((tmPtr) + (24)) >> 2)] = date.getDay();
+    (growMemViews(), HEAP32)[(((tmPtr) + (24)) >> 2)] = date.getDay();
     var yday = ydayFromDate(date) | 0;
-    HEAP32[(((tmPtr) + (28)) >> 2)] = yday;
+    (growMemViews(), HEAP32)[(((tmPtr) + (28)) >> 2)] = yday;
     // To match expected behavior, update fields from date
-    HEAP32[((tmPtr) >> 2)] = date.getSeconds();
-    HEAP32[(((tmPtr) + (4)) >> 2)] = date.getMinutes();
-    HEAP32[(((tmPtr) + (8)) >> 2)] = date.getHours();
-    HEAP32[(((tmPtr) + (12)) >> 2)] = date.getDate();
-    HEAP32[(((tmPtr) + (16)) >> 2)] = date.getMonth();
-    HEAP32[(((tmPtr) + (20)) >> 2)] = date.getYear();
+    (growMemViews(), HEAP32)[((tmPtr) >> 2)] = date.getSeconds();
+    (growMemViews(), HEAP32)[(((tmPtr) + (4)) >> 2)] = date.getMinutes();
+    (growMemViews(), HEAP32)[(((tmPtr) + (8)) >> 2)] = date.getHours();
+    (growMemViews(), HEAP32)[(((tmPtr) + (12)) >> 2)] = date.getDate();
+    (growMemViews(), HEAP32)[(((tmPtr) + (16)) >> 2)] = date.getMonth();
+    (growMemViews(), HEAP32)[(((tmPtr) + (20)) >> 2)] = date.getYear();
     var timeMs = date.getTime();
     if (isNaN(timeMs)) {
       return -1;
@@ -5657,13 +6419,14 @@ var __mktime_js = function(tmPtr) {
 };
 
 function __mmap_js(len, prot, flags, fd, offset_low, offset_high, allocated, addr) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(14, 0, 1, len, prot, flags, fd, offset_low, offset_high, allocated, addr);
   var offset = convertI32PairToI53Checked(offset_low, offset_high);
   try {
     var stream = SYSCALLS.getStreamFromFD(fd);
     var res = FS.mmap(stream, len, offset, prot, flags);
     var ptr = res.ptr;
-    HEAP32[((allocated) >> 2)] = res.allocated;
-    HEAPU32[((addr) >> 2)] = ptr;
+    (growMemViews(), HEAP32)[((allocated) >> 2)] = res.allocated;
+    (growMemViews(), HEAPU32)[((addr) >> 2)] = ptr;
     return 0;
   } catch (e) {
     if (typeof FS == "undefined" || !(e.name === "ErrnoError")) throw e;
@@ -5672,6 +6435,7 @@ function __mmap_js(len, prot, flags, fd, offset_low, offset_high, allocated, add
 }
 
 function __munmap_js(addr, len, prot, flags, fd, offset_low, offset_high) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(15, 0, 1, addr, len, prot, flags, fd, offset_low, offset_high);
   var offset = convertI32PairToI53Checked(offset_low, offset_high);
   try {
     var stream = SYSCALLS.getStreamFromFD(fd);
@@ -5703,8 +6467,8 @@ var __tzset_js = (timezone, daylight, std_name, dst_name) => {
   // Coordinated Universal Time (UTC) and local standard time."), the same
   // as returned by stdTimezoneOffset.
   // See http://pubs.opengroup.org/onlinepubs/009695399/functions/tzset.html
-  HEAPU32[((timezone) >> 2)] = stdTimezoneOffset * 60;
-  HEAP32[((daylight) >> 2)] = Number(winterOffset != summerOffset);
+  (growMemViews(), HEAPU32)[((timezone) >> 2)] = stdTimezoneOffset * 60;
+  (growMemViews(), HEAP32)[((daylight) >> 2)] = Number(winterOffset != summerOffset);
   var extractZone = timezoneOffset => {
     // Why inverse sign?
     // Read here https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/getTimezoneOffset
@@ -5726,7 +6490,7 @@ var __tzset_js = (timezone, daylight, std_name, dst_name) => {
   }
 };
 
-var _emscripten_get_now = () => performance.now();
+var _emscripten_get_now = () => performance.timeOrigin + performance.now();
 
 var _emscripten_date_now = () => Date.now();
 
@@ -5751,7 +6515,7 @@ function _clock_time_get(clk_id, ignored_precision_low, ignored_precision_high, 
   // "now" is in ms, and wasi times are in ns.
   var nsec = Math.round(now * 1e3 * 1e3);
   (tempI64 = [ nsec >>> 0, (tempDouble = nsec, (+(Math.abs(tempDouble))) >= 1 ? (tempDouble > 0 ? (+(Math.floor((tempDouble) / 4294967296))) >>> 0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble))) >>> 0)) / 4294967296))))) >>> 0) : 0) ], 
-  HEAP32[((ptime) >> 2)] = tempI64[0], HEAP32[(((ptime) + (4)) >> 2)] = tempI64[1]);
+  (growMemViews(), HEAP32)[((ptime) >> 2)] = tempI64[0], (growMemViews(), HEAP32)[(((ptime) + (4)) >> 2)] = tempI64[1]);
   return 0;
 }
 
@@ -5762,14 +6526,15 @@ var readEmAsmArgs = (sigPtr, buf) => {
   var ch;
   // Most arguments are i32s, so shift the buffer pointer so it is a plain
   // index into HEAP32.
-  while (ch = HEAPU8[sigPtr++]) {
+  while (ch = (growMemViews(), HEAPU8)[sigPtr++]) {
     // Floats are always passed as doubles, so all types except for 'i'
     // are 8 bytes and require alignment.
     var wide = (ch != 105);
     wide &= (ch != 112);
     buf += wide && (buf % 8) ? 4 : 0;
     readEmAsmArgsArray.push(// Special case for pointers under wasm64 or CAN_ADDRESS_2GB mode.
-    ch == 112 ? HEAPU32[((buf) >> 2)] : ch == 105 ? HEAP32[((buf) >> 2)] : HEAPF64[((buf) >> 3)]);
+    ch == 112 ? (growMemViews(), HEAPU32)[((buf) >> 2)] : ch == 105 ? (growMemViews(), 
+    HEAP32)[((buf) >> 2)] : (growMemViews(), HEAPF64)[((buf) >> 3)]);
     buf += wide ? 8 : 4;
   }
   return readEmAsmArgsArray;
@@ -5782,7 +6547,33 @@ var runEmAsmFunction = (code, sigPtr, argbuf) => {
 
 var _emscripten_asm_const_int = (code, sigPtr, argbuf) => runEmAsmFunction(code, sigPtr, argbuf);
 
+var runMainThreadEmAsm = (emAsmAddr, sigPtr, argbuf, sync) => {
+  var args = readEmAsmArgs(sigPtr, argbuf);
+  if (ENVIRONMENT_IS_PTHREAD) {
+    // EM_ASM functions are variadic, receiving the actual arguments as a buffer
+    // in memory. the last parameter (argBuf) points to that data. We need to
+    // always un-variadify that, *before proxying*, as in the async case this
+    // is a stack allocation that LLVM made, which may go away before the main
+    // thread gets the message. For that reason we handle proxying *after* the
+    // call to readEmAsmArgs, and therefore we do that manually here instead
+    // of using __proxy. (And for simplicity, do the same in the sync
+    // case as well, even though it's not strictly necessary, to keep the two
+    // code paths as similar as possible on both sides.)
+    return proxyToMainThread(0, emAsmAddr, sync, ...args);
+  }
+  return ASM_CONSTS[emAsmAddr](...args);
+};
+
+var _emscripten_asm_const_int_sync_on_main_thread = (emAsmAddr, sigPtr, argbuf) => runMainThreadEmAsm(emAsmAddr, sigPtr, argbuf, 1);
+
+var _emscripten_check_blocking_allowed = () => {};
+
 var _emscripten_errn = (str, len) => err(UTF8ToString(str, len));
+
+var _emscripten_exit_with_live_runtime = () => {
+  runtimeKeepalivePush();
+  throw "unwind";
+};
 
 var getHeapMax = () => // Stay one Wasm page short of 4GB: while e.g. Chrome is able to allocate
 // full 4GB Wasm memories, the size will wrap back to 0 bytes in Wasm side
@@ -5793,6 +6584,8 @@ var getHeapMax = () => // Stay one Wasm page short of 4GB: while e.g. Chrome is 
 var _emscripten_get_heap_max = () => getHeapMax();
 
 var _emscripten_has_asyncify = () => 0;
+
+var _emscripten_num_logical_cores = () => ENVIRONMENT_IS_NODE ? require("node:os").cpus().length : navigator["hardwareConcurrency"];
 
 var _emscripten_outn = (str, len) => out(UTF8ToString(str, len));
 
@@ -5882,11 +6675,14 @@ var growMemory = size => {
 };
 
 var _emscripten_resize_heap = requestedSize => {
-  var oldSize = HEAPU8.length;
+  var oldSize = (growMemViews(), HEAPU8).length;
   // With CAN_ADDRESS_2GB or MEMORY64, pointers are already unsigned.
   requestedSize >>>= 0;
   // With multithreaded builds, races can happen (another thread might increase the size
   // in between), so return a failure, and let the caller retry.
+  if (requestedSize <= oldSize) {
+    return false;
+  }
   // Memory resize rules:
   // 1.  Always increase heap size to at least the requested size, rounded up
   //     to next page multiple.
@@ -5942,12 +6738,10 @@ var _emscripten_stack_unwind_buffer = (addr, buffer, count) => {
     ++offset;
   }
   for (var i = 0; i < count && stack[i + offset]; ++i) {
-    HEAP32[(((buffer) + (i * 4)) >> 2)] = convertFrameToPC(stack[i + offset]);
+    (growMemViews(), HEAP32)[(((buffer) + (i * 4)) >> 2)] = convertFrameToPC(stack[i + offset]);
   }
   return i;
 };
-
-var stackAlloc = sz => __emscripten_stack_alloc(sz);
 
 var stringToUTF8OnStack = str => {
   var size = lengthBytesUTF8(str) + 1;
@@ -5957,12 +6751,13 @@ var stringToUTF8OnStack = str => {
 };
 
 var writeI53ToI64 = (ptr, num) => {
-  HEAPU32[((ptr) >> 2)] = num;
-  var lower = HEAPU32[((ptr) >> 2)];
-  HEAPU32[(((ptr) + (4)) >> 2)] = (num - lower) / 4294967296;
+  (growMemViews(), HEAPU32)[((ptr) >> 2)] = num;
+  var lower = (growMemViews(), HEAPU32)[((ptr) >> 2)];
+  (growMemViews(), HEAPU32)[(((ptr) + (4)) >> 2)] = (num - lower) / 4294967296;
 };
 
-var readI53FromI64 = ptr => HEAPU32[((ptr) >> 2)] + HEAP32[(((ptr) + (4)) >> 2)] * 4294967296;
+var readI53FromI64 = ptr => (growMemViews(), HEAPU32)[((ptr) >> 2)] + (growMemViews(), 
+HEAP32)[(((ptr) + (4)) >> 2)] * 4294967296;
 
 var WebGPU = {
   Internals: {
@@ -6101,27 +6896,28 @@ var WebGPU = {
     stackRestore(sp);
   },
   iterateExtensions: (root, handlers) => {
-    for (var ptr = HEAPU32[((root) >> 2)]; ptr; ptr = HEAPU32[((ptr) >> 2)]) {
-      var sType = HEAP32[(((ptr) + (4)) >> 2)];
+    for (var ptr = (growMemViews(), HEAPU32)[((root) >> 2)]; ptr; ptr = (growMemViews(), 
+    HEAPU32)[((ptr) >> 2)]) {
+      var sType = (growMemViews(), HEAP32)[(((ptr) + (4)) >> 2)];
       // This will crash if there's no handler indicating either a bogus
       // sType, or one we haven't implemented yet.
       var handler = handlers[sType](ptr);
     }
   },
   setStringView: (ptr, data, length) => {
-    HEAPU32[((ptr) >> 2)] = data;
-    HEAPU32[(((ptr) + (4)) >> 2)] = length;
+    (growMemViews(), HEAPU32)[((ptr) >> 2)] = data;
+    (growMemViews(), HEAPU32)[(((ptr) + (4)) >> 2)] = length;
   },
   makeStringFromStringView: stringViewPtr => {
-    var ptr = HEAPU32[((stringViewPtr) >> 2)];
-    var length = HEAPU32[(((stringViewPtr) + (4)) >> 2)];
+    var ptr = (growMemViews(), HEAPU32)[((stringViewPtr) >> 2)];
+    var length = (growMemViews(), HEAPU32)[(((stringViewPtr) + (4)) >> 2)];
     // UTF8ToString stops at the first null terminator character in the
     // string regardless of the length.
     return UTF8ToString(ptr, length);
   },
   makeStringFromOptionalStringView: stringViewPtr => {
-    var ptr = HEAPU32[((stringViewPtr) >> 2)];
-    var length = HEAPU32[(((stringViewPtr) + (4)) >> 2)];
+    var ptr = (growMemViews(), HEAPU32)[((stringViewPtr) >> 2)];
+    var length = (growMemViews(), HEAPU32)[(((stringViewPtr) + (4)) >> 2)];
     // If we don't have a valid string pointer, just return undefined when
     // optional.
     if (!ptr) {
@@ -6135,30 +6931,30 @@ var WebGPU = {
     return UTF8ToString(ptr, length);
   },
   makeColor: ptr => ({
-    "r": HEAPF64[((ptr) >> 3)],
-    "g": HEAPF64[(((ptr) + (8)) >> 3)],
-    "b": HEAPF64[(((ptr) + (16)) >> 3)],
-    "a": HEAPF64[(((ptr) + (24)) >> 3)]
+    "r": (growMemViews(), HEAPF64)[((ptr) >> 3)],
+    "g": (growMemViews(), HEAPF64)[(((ptr) + (8)) >> 3)],
+    "b": (growMemViews(), HEAPF64)[(((ptr) + (16)) >> 3)],
+    "a": (growMemViews(), HEAPF64)[(((ptr) + (24)) >> 3)]
   }),
   makeExtent3D: ptr => ({
-    "width": HEAPU32[((ptr) >> 2)],
-    "height": HEAPU32[(((ptr) + (4)) >> 2)],
-    "depthOrArrayLayers": HEAPU32[(((ptr) + (8)) >> 2)]
+    "width": (growMemViews(), HEAPU32)[((ptr) >> 2)],
+    "height": (growMemViews(), HEAPU32)[(((ptr) + (4)) >> 2)],
+    "depthOrArrayLayers": (growMemViews(), HEAPU32)[(((ptr) + (8)) >> 2)]
   }),
   makeOrigin3D: ptr => ({
-    "x": HEAPU32[((ptr) >> 2)],
-    "y": HEAPU32[(((ptr) + (4)) >> 2)],
-    "z": HEAPU32[(((ptr) + (8)) >> 2)]
+    "x": (growMemViews(), HEAPU32)[((ptr) >> 2)],
+    "y": (growMemViews(), HEAPU32)[(((ptr) + (4)) >> 2)],
+    "z": (growMemViews(), HEAPU32)[(((ptr) + (8)) >> 2)]
   }),
   makeTexelCopyTextureInfo: ptr => ({
-    "texture": WebGPU.getJsObject(HEAPU32[((ptr) >> 2)]),
-    "mipLevel": HEAPU32[(((ptr) + (4)) >> 2)],
+    "texture": WebGPU.getJsObject((growMemViews(), HEAPU32)[((ptr) >> 2)]),
+    "mipLevel": (growMemViews(), HEAPU32)[(((ptr) + (4)) >> 2)],
     "origin": WebGPU.makeOrigin3D(ptr + 8),
-    "aspect": WebGPU.TextureAspect[HEAP32[(((ptr) + (20)) >> 2)]]
+    "aspect": WebGPU.TextureAspect[(growMemViews(), HEAP32)[(((ptr) + (20)) >> 2)]]
   }),
   makeTexelCopyBufferLayout: ptr => {
-    var bytesPerRow = HEAPU32[(((ptr) + (8)) >> 2)];
-    var rowsPerImage = HEAPU32[(((ptr) + (12)) >> 2)];
+    var bytesPerRow = (growMemViews(), HEAPU32)[(((ptr) + (8)) >> 2)];
+    var rowsPerImage = (growMemViews(), HEAPU32)[(((ptr) + (12)) >> 2)];
     return {
       "offset": readI53FromI64(ptr),
       "bytesPerRow": bytesPerRow === 4294967295 ? undefined : bytesPerRow,
@@ -6168,15 +6964,15 @@ var WebGPU = {
   makeTexelCopyBufferInfo: ptr => {
     var layoutPtr = ptr + 0;
     var bufferCopyView = WebGPU.makeTexelCopyBufferLayout(layoutPtr);
-    bufferCopyView["buffer"] = WebGPU.getJsObject(HEAPU32[(((ptr) + (16)) >> 2)]);
+    bufferCopyView["buffer"] = WebGPU.getJsObject((growMemViews(), HEAPU32)[(((ptr) + (16)) >> 2)]);
     return bufferCopyView;
   },
   makePassTimestampWrites: ptr => {
     if (ptr === 0) return undefined;
     return {
-      "querySet": WebGPU.getJsObject(HEAPU32[(((ptr) + (4)) >> 2)]),
-      "beginningOfPassWriteIndex": HEAPU32[(((ptr) + (8)) >> 2)],
-      "endOfPassWriteIndex": HEAPU32[(((ptr) + (12)) >> 2)]
+      "querySet": WebGPU.getJsObject((growMemViews(), HEAPU32)[(((ptr) + (4)) >> 2)]),
+      "beginningOfPassWriteIndex": (growMemViews(), HEAPU32)[(((ptr) + (8)) >> 2)],
+      "endOfPassWriteIndex": (growMemViews(), HEAPU32)[(((ptr) + (12)) >> 2)]
     };
   },
   makePipelineConstants: (constantCount, constantsPtr) => {
@@ -6185,7 +6981,7 @@ var WebGPU = {
     for (var i = 0; i < constantCount; ++i) {
       var entryPtr = constantsPtr + 24 * i;
       var key = WebGPU.makeStringFromStringView(entryPtr + 4);
-      constants[key] = HEAPF64[(((entryPtr) + (16)) >> 3)];
+      constants[key] = (growMemViews(), HEAPF64)[(((entryPtr) + (16)) >> 3)];
     }
     return constants;
   },
@@ -6196,8 +6992,9 @@ var WebGPU = {
   makeComputeState: ptr => {
     if (!ptr) return undefined;
     var desc = {
-      "module": WebGPU.getJsObject(HEAPU32[(((ptr) + (4)) >> 2)]),
-      "constants": WebGPU.makePipelineConstants(HEAPU32[(((ptr) + (16)) >> 2)], HEAPU32[(((ptr) + (20)) >> 2)]),
+      "module": WebGPU.getJsObject((growMemViews(), HEAPU32)[(((ptr) + (4)) >> 2)]),
+      "constants": WebGPU.makePipelineConstants((growMemViews(), HEAPU32)[(((ptr) + (16)) >> 2)], (growMemViews(), 
+      HEAPU32)[(((ptr) + (20)) >> 2)]),
       "entryPoint": WebGPU.makeStringFromOptionalStringView(ptr + 8)
     };
     return desc;
@@ -6205,7 +7002,7 @@ var WebGPU = {
   makeComputePipelineDesc: descriptor => {
     var desc = {
       "label": WebGPU.makeStringFromOptionalStringView(descriptor + 4),
-      "layout": WebGPU.makePipelineLayout(HEAPU32[(((descriptor) + (12)) >> 2)]),
+      "layout": WebGPU.makePipelineLayout((growMemViews(), HEAPU32)[(((descriptor) + (12)) >> 2)]),
       "compute": WebGPU.makeComputeState(descriptor + 16)
     };
     return desc;
@@ -6214,19 +7011,19 @@ var WebGPU = {
     function makePrimitiveState(psPtr) {
       if (!psPtr) return undefined;
       return {
-        "topology": WebGPU.PrimitiveTopology[HEAP32[(((psPtr) + (4)) >> 2)]],
-        "stripIndexFormat": WebGPU.IndexFormat[HEAP32[(((psPtr) + (8)) >> 2)]],
-        "frontFace": WebGPU.FrontFace[HEAP32[(((psPtr) + (12)) >> 2)]],
-        "cullMode": WebGPU.CullMode[HEAP32[(((psPtr) + (16)) >> 2)]],
-        "unclippedDepth": !!(HEAPU32[(((psPtr) + (20)) >> 2)])
+        "topology": WebGPU.PrimitiveTopology[(growMemViews(), HEAP32)[(((psPtr) + (4)) >> 2)]],
+        "stripIndexFormat": WebGPU.IndexFormat[(growMemViews(), HEAP32)[(((psPtr) + (8)) >> 2)]],
+        "frontFace": WebGPU.FrontFace[(growMemViews(), HEAP32)[(((psPtr) + (12)) >> 2)]],
+        "cullMode": WebGPU.CullMode[(growMemViews(), HEAP32)[(((psPtr) + (16)) >> 2)]],
+        "unclippedDepth": !!((growMemViews(), HEAPU32)[(((psPtr) + (20)) >> 2)])
       };
     }
     function makeBlendComponent(bdPtr) {
       if (!bdPtr) return undefined;
       return {
-        "operation": WebGPU.BlendOperation[HEAP32[((bdPtr) >> 2)]],
-        "srcFactor": WebGPU.BlendFactor[HEAP32[(((bdPtr) + (4)) >> 2)]],
-        "dstFactor": WebGPU.BlendFactor[HEAP32[(((bdPtr) + (8)) >> 2)]]
+        "operation": WebGPU.BlendOperation[(growMemViews(), HEAP32)[((bdPtr) >> 2)]],
+        "srcFactor": WebGPU.BlendFactor[(growMemViews(), HEAP32)[(((bdPtr) + (4)) >> 2)]],
+        "dstFactor": WebGPU.BlendFactor[(growMemViews(), HEAP32)[(((bdPtr) + (8)) >> 2)]]
       };
     }
     function makeBlendState(bsPtr) {
@@ -6237,11 +7034,11 @@ var WebGPU = {
       };
     }
     function makeColorState(csPtr) {
-      var format = WebGPU.TextureFormat[HEAP32[(((csPtr) + (4)) >> 2)]];
+      var format = WebGPU.TextureFormat[(growMemViews(), HEAP32)[(((csPtr) + (4)) >> 2)]];
       return format ? {
         "format": format,
-        "blend": makeBlendState(HEAPU32[(((csPtr) + (8)) >> 2)]),
-        "writeMask": HEAPU32[(((csPtr) + (16)) >> 2)]
+        "blend": makeBlendState((growMemViews(), HEAPU32)[(((csPtr) + (8)) >> 2)]),
+        "writeMask": (growMemViews(), HEAPU32)[(((csPtr) + (16)) >> 2)]
       } : undefined;
     }
     function makeColorStates(count, csArrayPtr) {
@@ -6253,32 +7050,32 @@ var WebGPU = {
     }
     function makeStencilStateFace(ssfPtr) {
       return {
-        "compare": WebGPU.CompareFunction[HEAP32[((ssfPtr) >> 2)]],
-        "failOp": WebGPU.StencilOperation[HEAP32[(((ssfPtr) + (4)) >> 2)]],
-        "depthFailOp": WebGPU.StencilOperation[HEAP32[(((ssfPtr) + (8)) >> 2)]],
-        "passOp": WebGPU.StencilOperation[HEAP32[(((ssfPtr) + (12)) >> 2)]]
+        "compare": WebGPU.CompareFunction[(growMemViews(), HEAP32)[((ssfPtr) >> 2)]],
+        "failOp": WebGPU.StencilOperation[(growMemViews(), HEAP32)[(((ssfPtr) + (4)) >> 2)]],
+        "depthFailOp": WebGPU.StencilOperation[(growMemViews(), HEAP32)[(((ssfPtr) + (8)) >> 2)]],
+        "passOp": WebGPU.StencilOperation[(growMemViews(), HEAP32)[(((ssfPtr) + (12)) >> 2)]]
       };
     }
     function makeDepthStencilState(dssPtr) {
       if (!dssPtr) return undefined;
       return {
-        "format": WebGPU.TextureFormat[HEAP32[(((dssPtr) + (4)) >> 2)]],
-        "depthWriteEnabled": !!(HEAPU32[(((dssPtr) + (8)) >> 2)]),
-        "depthCompare": WebGPU.CompareFunction[HEAP32[(((dssPtr) + (12)) >> 2)]],
+        "format": WebGPU.TextureFormat[(growMemViews(), HEAP32)[(((dssPtr) + (4)) >> 2)]],
+        "depthWriteEnabled": !!((growMemViews(), HEAPU32)[(((dssPtr) + (8)) >> 2)]),
+        "depthCompare": WebGPU.CompareFunction[(growMemViews(), HEAP32)[(((dssPtr) + (12)) >> 2)]],
         "stencilFront": makeStencilStateFace(dssPtr + 16),
         "stencilBack": makeStencilStateFace(dssPtr + 32),
-        "stencilReadMask": HEAPU32[(((dssPtr) + (48)) >> 2)],
-        "stencilWriteMask": HEAPU32[(((dssPtr) + (52)) >> 2)],
-        "depthBias": HEAP32[(((dssPtr) + (56)) >> 2)],
-        "depthBiasSlopeScale": HEAPF32[(((dssPtr) + (60)) >> 2)],
-        "depthBiasClamp": HEAPF32[(((dssPtr) + (64)) >> 2)]
+        "stencilReadMask": (growMemViews(), HEAPU32)[(((dssPtr) + (48)) >> 2)],
+        "stencilWriteMask": (growMemViews(), HEAPU32)[(((dssPtr) + (52)) >> 2)],
+        "depthBias": (growMemViews(), HEAP32)[(((dssPtr) + (56)) >> 2)],
+        "depthBiasSlopeScale": (growMemViews(), HEAPF32)[(((dssPtr) + (60)) >> 2)],
+        "depthBiasClamp": (growMemViews(), HEAPF32)[(((dssPtr) + (64)) >> 2)]
       };
     }
     function makeVertexAttribute(vaPtr) {
       return {
-        "format": WebGPU.VertexFormat[HEAP32[(((vaPtr) + (4)) >> 2)]],
+        "format": WebGPU.VertexFormat[(growMemViews(), HEAP32)[(((vaPtr) + (4)) >> 2)]],
         "offset": readI53FromI64((vaPtr) + (8)),
-        "shaderLocation": HEAPU32[(((vaPtr) + (16)) >> 2)]
+        "shaderLocation": (growMemViews(), HEAPU32)[(((vaPtr) + (16)) >> 2)]
       };
     }
     function makeVertexAttributes(count, vaArrayPtr) {
@@ -6290,15 +7087,15 @@ var WebGPU = {
     }
     function makeVertexBuffer(vbPtr) {
       if (!vbPtr) return undefined;
-      var stepMode = WebGPU.VertexStepMode[HEAP32[(((vbPtr) + (4)) >> 2)]];
-      var attributeCount = HEAPU32[(((vbPtr) + (16)) >> 2)];
+      var stepMode = WebGPU.VertexStepMode[(growMemViews(), HEAP32)[(((vbPtr) + (4)) >> 2)]];
+      var attributeCount = (growMemViews(), HEAPU32)[(((vbPtr) + (16)) >> 2)];
       if (!stepMode && !attributeCount) {
         return null;
       }
       return {
         "arrayStride": readI53FromI64((vbPtr) + (8)),
         "stepMode": stepMode,
-        "attributes": makeVertexAttributes(attributeCount, HEAPU32[(((vbPtr) + (20)) >> 2)])
+        "attributes": makeVertexAttributes(attributeCount, (growMemViews(), HEAPU32)[(((vbPtr) + (20)) >> 2)])
       };
     }
     function makeVertexBuffers(count, vbArrayPtr) {
@@ -6312,9 +7109,11 @@ var WebGPU = {
     function makeVertexState(viPtr) {
       if (!viPtr) return undefined;
       var desc = {
-        "module": WebGPU.getJsObject(HEAPU32[(((viPtr) + (4)) >> 2)]),
-        "constants": WebGPU.makePipelineConstants(HEAPU32[(((viPtr) + (16)) >> 2)], HEAPU32[(((viPtr) + (20)) >> 2)]),
-        "buffers": makeVertexBuffers(HEAPU32[(((viPtr) + (24)) >> 2)], HEAPU32[(((viPtr) + (28)) >> 2)]),
+        "module": WebGPU.getJsObject((growMemViews(), HEAPU32)[(((viPtr) + (4)) >> 2)]),
+        "constants": WebGPU.makePipelineConstants((growMemViews(), HEAPU32)[(((viPtr) + (16)) >> 2)], (growMemViews(), 
+        HEAPU32)[(((viPtr) + (20)) >> 2)]),
+        "buffers": makeVertexBuffers((growMemViews(), HEAPU32)[(((viPtr) + (24)) >> 2)], (growMemViews(), 
+        HEAPU32)[(((viPtr) + (28)) >> 2)]),
         "entryPoint": WebGPU.makeStringFromOptionalStringView(viPtr + 8)
       };
       return desc;
@@ -6322,37 +7121,39 @@ var WebGPU = {
     function makeMultisampleState(msPtr) {
       if (!msPtr) return undefined;
       return {
-        "count": HEAPU32[(((msPtr) + (4)) >> 2)],
-        "mask": HEAPU32[(((msPtr) + (8)) >> 2)],
-        "alphaToCoverageEnabled": !!(HEAPU32[(((msPtr) + (12)) >> 2)])
+        "count": (growMemViews(), HEAPU32)[(((msPtr) + (4)) >> 2)],
+        "mask": (growMemViews(), HEAPU32)[(((msPtr) + (8)) >> 2)],
+        "alphaToCoverageEnabled": !!((growMemViews(), HEAPU32)[(((msPtr) + (12)) >> 2)])
       };
     }
     function makeFragmentState(fsPtr) {
       if (!fsPtr) return undefined;
       var desc = {
-        "module": WebGPU.getJsObject(HEAPU32[(((fsPtr) + (4)) >> 2)]),
-        "constants": WebGPU.makePipelineConstants(HEAPU32[(((fsPtr) + (16)) >> 2)], HEAPU32[(((fsPtr) + (20)) >> 2)]),
-        "targets": makeColorStates(HEAPU32[(((fsPtr) + (24)) >> 2)], HEAPU32[(((fsPtr) + (28)) >> 2)]),
+        "module": WebGPU.getJsObject((growMemViews(), HEAPU32)[(((fsPtr) + (4)) >> 2)]),
+        "constants": WebGPU.makePipelineConstants((growMemViews(), HEAPU32)[(((fsPtr) + (16)) >> 2)], (growMemViews(), 
+        HEAPU32)[(((fsPtr) + (20)) >> 2)]),
+        "targets": makeColorStates((growMemViews(), HEAPU32)[(((fsPtr) + (24)) >> 2)], (growMemViews(), 
+        HEAPU32)[(((fsPtr) + (28)) >> 2)]),
         "entryPoint": WebGPU.makeStringFromOptionalStringView(fsPtr + 8)
       };
       return desc;
     }
     var desc = {
       "label": WebGPU.makeStringFromOptionalStringView(descriptor + 4),
-      "layout": WebGPU.makePipelineLayout(HEAPU32[(((descriptor) + (12)) >> 2)]),
+      "layout": WebGPU.makePipelineLayout((growMemViews(), HEAPU32)[(((descriptor) + (12)) >> 2)]),
       "vertex": makeVertexState(descriptor + 16),
       "primitive": makePrimitiveState(descriptor + 48),
-      "depthStencil": makeDepthStencilState(HEAPU32[(((descriptor) + (72)) >> 2)]),
+      "depthStencil": makeDepthStencilState((growMemViews(), HEAPU32)[(((descriptor) + (72)) >> 2)]),
       "multisample": makeMultisampleState(descriptor + 76),
-      "fragment": makeFragmentState(HEAPU32[(((descriptor) + (92)) >> 2)])
+      "fragment": makeFragmentState((growMemViews(), HEAPU32)[(((descriptor) + (92)) >> 2)])
     };
     return desc;
   },
   fillLimitStruct: (limits, limitsOutPtr) => {
-    var nextInChainPtr = HEAPU32[((limitsOutPtr) >> 2)];
+    var nextInChainPtr = (growMemViews(), HEAPU32)[((limitsOutPtr) >> 2)];
     function setLimitValueU32(name, basePtr, limitOffset, fallbackValue = 0) {
       var limitValue = limits[name] ?? fallbackValue;
-      HEAPU32[(((basePtr) + (limitOffset)) >> 2)] = limitValue;
+      (growMemViews(), HEAPU32)[(((basePtr) + (limitOffset)) >> 2)] = limitValue;
     }
     function setLimitValueU64(name, basePtr, limitOffset, fallbackValue = 0) {
       var limitValue = limits[name] ?? fallbackValue;
@@ -6393,7 +7194,7 @@ var WebGPU = {
     // Note this limit is new and won't be present in all browsers for a while. Fall back to 0.
     setLimitValueU32("maxImmediateSize", limitsOutPtr, 148);
     if (nextInChainPtr !== 0) {
-      var sType = HEAP32[(((nextInChainPtr) + (4)) >> 2)];
+      var sType = (growMemViews(), HEAP32)[(((nextInChainPtr) + (4)) >> 2)];
       var compatibilityModeLimitsPtr = nextInChainPtr;
       // Note these limits are new and won't be present in all browsers for a while. Fall back to exposing the PerShaderStage limit.
       setLimitValueU32("maxStorageBuffersInVertexStage", compatibilityModeLimitsPtr, 8, limits.maxStorageBuffersPerShaderStage);
@@ -6404,8 +7205,8 @@ var WebGPU = {
   },
   fillAdapterInfoStruct: (info, infoStruct) => {
     // Populate subgroup limits.
-    HEAPU32[(((infoStruct) + (52)) >> 2)] = info.subgroupMinSize;
-    HEAPU32[(((infoStruct) + (56)) >> 2)] = info.subgroupMaxSize;
+    (growMemViews(), HEAPU32)[(((infoStruct) + (52)) >> 2)] = info.subgroupMinSize;
+    (growMemViews(), HEAPU32)[(((infoStruct) + (56)) >> 2)] = info.subgroupMaxSize;
     // Append all the strings together to condense into a single malloc.
     var strs = info.vendor + info.architecture + info.device + info.description;
     var strPtr = stringToNewUTF8(strs);
@@ -6421,11 +7222,11 @@ var WebGPU = {
     var descriptionLen = lengthBytesUTF8(info.description);
     WebGPU.setStringView(infoStruct + 28, strPtr, descriptionLen);
     strPtr += descriptionLen;
-    HEAP32[(((infoStruct) + (36)) >> 2)] = 2;
+    (growMemViews(), HEAP32)[(((infoStruct) + (36)) >> 2)] = 2;
     var adapterType = info.isFallbackAdapter ? 3 : 4;
-    HEAP32[(((infoStruct) + (40)) >> 2)] = adapterType;
-    HEAPU32[(((infoStruct) + (44)) >> 2)] = 0;
-    HEAPU32[(((infoStruct) + (48)) >> 2)] = 0;
+    (growMemViews(), HEAP32)[(((infoStruct) + (40)) >> 2)] = adapterType;
+    (growMemViews(), HEAPU32)[(((infoStruct) + (44)) >> 2)] = 0;
+    (growMemViews(), HEAPU32)[(((infoStruct) + (48)) >> 2)] = 0;
   },
   AddressMode: [ , "clamp-to-edge", "repeat", "mirror-repeat" ],
   BlendFactor: [ , "zero", "one", "src", "one-minus-src", "src-alpha", "one-minus-src-alpha", "dst", "one-minus-dst", "dst-alpha", "one-minus-dst-alpha", "src-alpha-saturated", "constant", "one-minus-constant", "src1", "one-minus-src1", "src1-alpha", "one-minus-src1-alpha" ],
@@ -6526,9 +7327,9 @@ var _emwgpuBufferGetMappedRange = (bufferPtr, offset, size) => {
     return 0;
   }
   var data = _memalign(16, mapped.byteLength);
-  HEAPU8.fill(0, data, mapped.byteLength);
+  (growMemViews(), HEAPU8).fill(0, data, mapped.byteLength);
   WebGPU.Internals.bufferOnUnmaps[bufferPtr].push(() => {
-    new Uint8Array(mapped).set(HEAPU8.subarray(data, data + mapped.byteLength));
+    new Uint8Array(mapped).set((growMemViews(), HEAPU8).subarray(data, data + mapped.byteLength));
     _free(data);
   });
   return data;
@@ -6556,7 +7357,7 @@ var _emwgpuBufferWriteMappedRange = (bufferPtr, offset, data, size) => {
   } catch (ex) {
     return 2;
   }
-  new Uint8Array(mapped).set(HEAPU8.subarray(data, data + size));
+  new Uint8Array(mapped).set((growMemViews(), HEAPU8).subarray(data, data + size));
   return 1;
 };
 
@@ -6565,10 +7366,10 @@ var _emwgpuDelete = ptr => {
 };
 
 var _emwgpuDeviceCreateBuffer = (devicePtr, descriptor, bufferPtr) => {
-  var mappedAtCreation = !!(HEAPU32[(((descriptor) + (32)) >> 2)]);
+  var mappedAtCreation = !!((growMemViews(), HEAPU32)[(((descriptor) + (32)) >> 2)]);
   var desc = {
     "label": WebGPU.makeStringFromOptionalStringView(descriptor + 4),
-    "usage": HEAPU32[(((descriptor) + (16)) >> 2)],
+    "usage": (growMemViews(), HEAPU32)[(((descriptor) + (16)) >> 2)],
     "size": readI53FromI64((descriptor) + (24)),
     "mappedAtCreation": mappedAtCreation
   };
@@ -6591,14 +7392,17 @@ var _emwgpuDeviceCreateComputePipelineAsync = function(devicePtr, futureId_low, 
   var futureId = convertI32PairToI53Checked(futureId_low, futureId_high);
   var desc = WebGPU.makeComputePipelineDesc(descriptor);
   var device = WebGPU.getJsObject(devicePtr);
+  runtimeKeepalivePush();
   // createComputePipelineAsync
   WebGPU.Internals.futureInsert(futureId, device.createComputePipelineAsync(desc).then(pipeline => {
+    runtimeKeepalivePop();
     // createComputePipelineAsync fulfilled
     callUserCallback(() => {
       WebGPU.Internals.jsObjectInsert(pipelinePtr, pipeline);
       _emwgpuOnCreateComputePipelineCompleted(futureId, 1, pipelinePtr, 0);
     });
   }, pipelineError => {
+    runtimeKeepalivePop();
     // createComputePipelineAsync rejected
     callUserCallback(() => {
       var sp = stackSave();
@@ -6611,8 +7415,8 @@ var _emwgpuDeviceCreateComputePipelineAsync = function(devicePtr, futureId_low, 
 };
 
 var _emwgpuDeviceCreateShaderModule = (devicePtr, descriptor, shaderModulePtr) => {
-  var nextInChainPtr = HEAPU32[((descriptor) >> 2)];
-  var sType = HEAP32[(((nextInChainPtr) + (4)) >> 2)];
+  var nextInChainPtr = (growMemViews(), HEAPU32)[((descriptor) >> 2)];
+  var sType = (growMemViews(), HEAP32)[(((nextInChainPtr) + (4)) >> 2)];
   var desc = {
     "label": WebGPU.makeStringFromOptionalStringView(descriptor + 4),
     "code": ""
@@ -6638,8 +7442,10 @@ var _emwgpuDeviceDestroy = devicePtr => {
 var _emwgpuQueueOnSubmittedWorkDone = function(queuePtr, futureId_low, futureId_high) {
   var futureId = convertI32PairToI53Checked(futureId_low, futureId_high);
   var queue = WebGPU.getJsObject(queuePtr);
+  runtimeKeepalivePush();
   // onSubmittedWorkDone
   WebGPU.Internals.futureInsert(futureId, queue.onSubmittedWorkDone().then(() => {
+    runtimeKeepalivePop();
     // onSubmittedWorkDone fulfilled (assumed not to reject)
     callUserCallback(() => {
       _emwgpuOnWorkDoneCompleted(futureId, 1);
@@ -6685,30 +7491,33 @@ var getEnvStrings = () => {
   return getEnvStrings.strings;
 };
 
-var _environ_get = (__environ, environ_buf) => {
+function _environ_get(__environ, environ_buf) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(16, 0, 1, __environ, environ_buf);
   var bufSize = 0;
   var envp = 0;
   for (var string of getEnvStrings()) {
     var ptr = environ_buf + bufSize;
-    HEAPU32[(((__environ) + (envp)) >> 2)] = ptr;
+    (growMemViews(), HEAPU32)[(((__environ) + (envp)) >> 2)] = ptr;
     bufSize += stringToUTF8(string, ptr, Infinity) + 1;
     envp += 4;
   }
   return 0;
-};
+}
 
-var _environ_sizes_get = (penviron_count, penviron_buf_size) => {
+function _environ_sizes_get(penviron_count, penviron_buf_size) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(17, 0, 1, penviron_count, penviron_buf_size);
   var strings = getEnvStrings();
-  HEAPU32[((penviron_count) >> 2)] = strings.length;
+  (growMemViews(), HEAPU32)[((penviron_count) >> 2)] = strings.length;
   var bufSize = 0;
   for (var string of strings) {
     bufSize += lengthBytesUTF8(string) + 1;
   }
-  HEAPU32[((penviron_buf_size) >> 2)] = bufSize;
+  (growMemViews(), HEAPU32)[((penviron_buf_size) >> 2)] = bufSize;
   return 0;
-};
+}
 
 function _fd_close(fd) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(18, 0, 1, fd);
   try {
     var stream = SYSCALLS.getStreamFromFD(fd);
     FS.close(stream);
@@ -6722,10 +7531,10 @@ function _fd_close(fd) {
 /** @param {number=} offset */ var doReadv = (stream, iov, iovcnt, offset) => {
   var ret = 0;
   for (var i = 0; i < iovcnt; i++) {
-    var ptr = HEAPU32[((iov) >> 2)];
-    var len = HEAPU32[(((iov) + (4)) >> 2)];
+    var ptr = (growMemViews(), HEAPU32)[((iov) >> 2)];
+    var len = (growMemViews(), HEAPU32)[(((iov) + (4)) >> 2)];
     iov += 8;
-    var curr = FS.read(stream, HEAP8, ptr, len, offset);
+    var curr = FS.read(stream, (growMemViews(), HEAP8), ptr, len, offset);
     if (curr < 0) return -1;
     ret += curr;
     if (curr < len) break;
@@ -6738,12 +7547,13 @@ function _fd_close(fd) {
 };
 
 function _fd_pread(fd, iov, iovcnt, offset_low, offset_high, pnum) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(19, 0, 1, fd, iov, iovcnt, offset_low, offset_high, pnum);
   var offset = convertI32PairToI53Checked(offset_low, offset_high);
   try {
     if (isNaN(offset)) return 61;
     var stream = SYSCALLS.getStreamFromFD(fd);
     var num = doReadv(stream, iov, iovcnt, offset);
-    HEAPU32[((pnum) >> 2)] = num;
+    (growMemViews(), HEAPU32)[((pnum) >> 2)] = num;
     return 0;
   } catch (e) {
     if (typeof FS == "undefined" || !(e.name === "ErrnoError")) throw e;
@@ -6752,10 +7562,11 @@ function _fd_pread(fd, iov, iovcnt, offset_low, offset_high, pnum) {
 }
 
 function _fd_read(fd, iov, iovcnt, pnum) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(20, 0, 1, fd, iov, iovcnt, pnum);
   try {
     var stream = SYSCALLS.getStreamFromFD(fd);
     var num = doReadv(stream, iov, iovcnt);
-    HEAPU32[((pnum) >> 2)] = num;
+    (growMemViews(), HEAPU32)[((pnum) >> 2)] = num;
     return 0;
   } catch (e) {
     if (typeof FS == "undefined" || !(e.name === "ErrnoError")) throw e;
@@ -6764,13 +7575,14 @@ function _fd_read(fd, iov, iovcnt, pnum) {
 }
 
 function _fd_seek(fd, offset_low, offset_high, whence, newOffset) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(21, 0, 1, fd, offset_low, offset_high, whence, newOffset);
   var offset = convertI32PairToI53Checked(offset_low, offset_high);
   try {
     if (isNaN(offset)) return 61;
     var stream = SYSCALLS.getStreamFromFD(fd);
     FS.llseek(stream, offset, whence);
     (tempI64 = [ stream.position >>> 0, (tempDouble = stream.position, (+(Math.abs(tempDouble))) >= 1 ? (tempDouble > 0 ? (+(Math.floor((tempDouble) / 4294967296))) >>> 0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble))) >>> 0)) / 4294967296))))) >>> 0) : 0) ], 
-    HEAP32[((newOffset) >> 2)] = tempI64[0], HEAP32[(((newOffset) + (4)) >> 2)] = tempI64[1]);
+    (growMemViews(), HEAP32)[((newOffset) >> 2)] = tempI64[0], (growMemViews(), HEAP32)[(((newOffset) + (4)) >> 2)] = tempI64[1]);
     if (stream.getdents && offset === 0 && whence === 0) stream.getdents = null;
     // reset readdir state
     return 0;
@@ -6783,10 +7595,10 @@ function _fd_seek(fd, offset_low, offset_high, whence, newOffset) {
 /** @param {number=} offset */ var doWritev = (stream, iov, iovcnt, offset) => {
   var ret = 0;
   for (var i = 0; i < iovcnt; i++) {
-    var ptr = HEAPU32[((iov) >> 2)];
-    var len = HEAPU32[(((iov) + (4)) >> 2)];
+    var ptr = (growMemViews(), HEAPU32)[((iov) >> 2)];
+    var len = (growMemViews(), HEAPU32)[(((iov) + (4)) >> 2)];
     iov += 8;
-    var curr = FS.write(stream, HEAP8, ptr, len, offset);
+    var curr = FS.write(stream, (growMemViews(), HEAP8), ptr, len, offset);
     if (curr < 0) return -1;
     ret += curr;
     if (curr < len) {
@@ -6801,10 +7613,11 @@ function _fd_seek(fd, offset_low, offset_high, whence, newOffset) {
 };
 
 function _fd_write(fd, iov, iovcnt, pnum) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(22, 0, 1, fd, iov, iovcnt, pnum);
   try {
     var stream = SYSCALLS.getStreamFromFD(fd);
     var num = doWritev(stream, iov, iovcnt);
-    HEAPU32[((pnum) >> 2)] = num;
+    (growMemViews(), HEAPU32)[((pnum) >> 2)] = num;
     return 0;
   } catch (e) {
     if (typeof FS == "undefined" || !(e.name === "ErrnoError")) throw e;
@@ -6812,7 +7625,7 @@ function _fd_write(fd, iov, iovcnt, pnum) {
   }
 }
 
-var _random_get = (buffer, size) => randomFill(HEAPU8.subarray(buffer, buffer + size));
+var _random_get = (buffer, size) => randomFill((growMemViews(), HEAPU8).subarray(buffer, buffer + size));
 
 var _wgpuBufferGetSize = function(bufferPtr) {
   var ret = (() => {
@@ -6838,7 +7651,7 @@ var _wgpuCommandEncoderBeginComputePass = (encoderPtr, descriptor) => {
   if (descriptor) {
     desc = {
       "label": WebGPU.makeStringFromOptionalStringView(descriptor + 4),
-      "timestampWrites": WebGPU.makePassTimestampWrites(HEAPU32[(((descriptor) + (12)) >> 2)])
+      "timestampWrites": WebGPU.makePassTimestampWrites((growMemViews(), HEAPU32)[(((descriptor) + (12)) >> 2)])
     };
   }
   var commandEncoder = WebGPU.getJsObject(encoderPtr);
@@ -6910,7 +7723,7 @@ var _wgpuComputePassEncoderSetBindGroup = (passPtr, groupIndex, groupPtr, dynami
   if (dynamicOffsetCount == 0) {
     pass.setBindGroup(groupIndex, group);
   } else {
-    pass.setBindGroup(groupIndex, group, HEAPU32, ((dynamicOffsetsPtr) >> 2), dynamicOffsetCount);
+    pass.setBindGroup(groupIndex, group, (growMemViews(), HEAPU32), ((dynamicOffsetsPtr) >> 2), dynamicOffsetCount);
   }
 };
 
@@ -6922,13 +7735,13 @@ var _wgpuComputePassEncoderSetPipeline = (passPtr, pipelinePtr) => {
 
 var _wgpuDeviceCreateBindGroup = (devicePtr, descriptor) => {
   function makeEntry(entryPtr) {
-    var bufferPtr = HEAPU32[(((entryPtr) + (8)) >> 2)];
-    var samplerPtr = HEAPU32[(((entryPtr) + (32)) >> 2)];
-    var textureViewPtr = HEAPU32[(((entryPtr) + (36)) >> 2)];
+    var bufferPtr = (growMemViews(), HEAPU32)[(((entryPtr) + (8)) >> 2)];
+    var samplerPtr = (growMemViews(), HEAPU32)[(((entryPtr) + (32)) >> 2)];
+    var textureViewPtr = (growMemViews(), HEAPU32)[(((entryPtr) + (36)) >> 2)];
     var externalTexturePtr = 0;
     WebGPU.iterateExtensions(entryPtr, {
       14: ptr => {
-        externalTexturePtr = HEAPU32[(((ptr) + (8)) >> 2)];
+        externalTexturePtr = (growMemViews(), HEAPU32)[(((ptr) + (8)) >> 2)];
       }
     });
     var resource;
@@ -6945,7 +7758,7 @@ var _wgpuDeviceCreateBindGroup = (devicePtr, descriptor) => {
       resource = WebGPU.getJsObject(samplerPtr || textureViewPtr || externalTexturePtr);
     }
     return {
-      "binding": HEAPU32[(((entryPtr) + (4)) >> 2)],
+      "binding": (growMemViews(), HEAPU32)[(((entryPtr) + (4)) >> 2)],
       "resource": resource
     };
   }
@@ -6958,8 +7771,9 @@ var _wgpuDeviceCreateBindGroup = (devicePtr, descriptor) => {
   }
   var desc = {
     "label": WebGPU.makeStringFromOptionalStringView(descriptor + 4),
-    "layout": WebGPU.getJsObject(HEAPU32[(((descriptor) + (12)) >> 2)]),
-    "entries": makeEntries(HEAPU32[(((descriptor) + (16)) >> 2)], HEAPU32[(((descriptor) + (20)) >> 2)])
+    "layout": WebGPU.getJsObject((growMemViews(), HEAPU32)[(((descriptor) + (12)) >> 2)]),
+    "entries": makeEntries((growMemViews(), HEAPU32)[(((descriptor) + (16)) >> 2)], (growMemViews(), 
+    HEAPU32)[(((descriptor) + (20)) >> 2)])
   };
   var device = WebGPU.getJsObject(devicePtr);
   var ptr = _emwgpuCreateBindGroup(0);
@@ -6969,43 +7783,43 @@ var _wgpuDeviceCreateBindGroup = (devicePtr, descriptor) => {
 
 var _wgpuDeviceCreateBindGroupLayout = (devicePtr, descriptor) => {
   function makeBufferEntry(substructPtr) {
-    var typeInt = HEAPU32[(((substructPtr) + (4)) >> 2)];
+    var typeInt = (growMemViews(), HEAPU32)[(((substructPtr) + (4)) >> 2)];
     if (!typeInt) return undefined;
     return {
       "type": WebGPU.BufferBindingType[typeInt],
-      "hasDynamicOffset": !!(HEAPU32[(((substructPtr) + (8)) >> 2)]),
+      "hasDynamicOffset": !!((growMemViews(), HEAPU32)[(((substructPtr) + (8)) >> 2)]),
       "minBindingSize": readI53FromI64((substructPtr) + (16))
     };
   }
   function makeSamplerEntry(substructPtr) {
-    var typeInt = HEAPU32[(((substructPtr) + (4)) >> 2)];
+    var typeInt = (growMemViews(), HEAPU32)[(((substructPtr) + (4)) >> 2)];
     if (!typeInt) return undefined;
     return {
       "type": WebGPU.SamplerBindingType[typeInt]
     };
   }
   function makeTextureEntry(substructPtr) {
-    var sampleTypeInt = HEAPU32[(((substructPtr) + (4)) >> 2)];
+    var sampleTypeInt = (growMemViews(), HEAPU32)[(((substructPtr) + (4)) >> 2)];
     if (!sampleTypeInt) return undefined;
     return {
       "sampleType": WebGPU.TextureSampleType[sampleTypeInt],
-      "viewDimension": WebGPU.TextureViewDimension[HEAP32[(((substructPtr) + (8)) >> 2)]],
-      "multisampled": !!(HEAPU32[(((substructPtr) + (12)) >> 2)])
+      "viewDimension": WebGPU.TextureViewDimension[(growMemViews(), HEAP32)[(((substructPtr) + (8)) >> 2)]],
+      "multisampled": !!((growMemViews(), HEAPU32)[(((substructPtr) + (12)) >> 2)])
     };
   }
   function makeStorageTextureEntry(substructPtr) {
-    var accessInt = HEAPU32[(((substructPtr) + (4)) >> 2)];
+    var accessInt = (growMemViews(), HEAPU32)[(((substructPtr) + (4)) >> 2)];
     if (!accessInt) return undefined;
     return {
       "access": WebGPU.StorageTextureAccess[accessInt],
-      "format": WebGPU.TextureFormat[HEAP32[(((substructPtr) + (8)) >> 2)]],
-      "viewDimension": WebGPU.TextureViewDimension[HEAP32[(((substructPtr) + (12)) >> 2)]]
+      "format": WebGPU.TextureFormat[(growMemViews(), HEAP32)[(((substructPtr) + (8)) >> 2)]],
+      "viewDimension": WebGPU.TextureViewDimension[(growMemViews(), HEAP32)[(((substructPtr) + (12)) >> 2)]]
     };
   }
   function makeEntry(entryPtr) {
     var entry = {
-      "binding": HEAPU32[(((entryPtr) + (4)) >> 2)],
-      "visibility": HEAPU32[(((entryPtr) + (8)) >> 2)],
+      "binding": (growMemViews(), HEAPU32)[(((entryPtr) + (4)) >> 2)],
+      "visibility": (growMemViews(), HEAPU32)[(((entryPtr) + (8)) >> 2)],
       "buffer": makeBufferEntry(entryPtr + 24),
       "sampler": makeSamplerEntry(entryPtr + 48),
       "texture": makeTextureEntry(entryPtr + 56),
@@ -7027,7 +7841,8 @@ var _wgpuDeviceCreateBindGroupLayout = (devicePtr, descriptor) => {
   }
   var desc = {
     "label": WebGPU.makeStringFromOptionalStringView(descriptor + 4),
-    "entries": makeEntries(HEAPU32[(((descriptor) + (12)) >> 2)], HEAPU32[(((descriptor) + (16)) >> 2)])
+    "entries": makeEntries((growMemViews(), HEAPU32)[(((descriptor) + (12)) >> 2)], (growMemViews(), 
+    HEAPU32)[(((descriptor) + (16)) >> 2)])
   };
   var device = WebGPU.getJsObject(devicePtr);
   var ptr = _emwgpuCreateBindGroupLayout(0);
@@ -7057,11 +7872,11 @@ var _wgpuDeviceCreateComputePipeline = (devicePtr, descriptor) => {
 };
 
 var _wgpuDeviceCreatePipelineLayout = (devicePtr, descriptor) => {
-  var bglCount = HEAPU32[(((descriptor) + (12)) >> 2)];
-  var bglPtr = HEAPU32[(((descriptor) + (16)) >> 2)];
+  var bglCount = (growMemViews(), HEAPU32)[(((descriptor) + (12)) >> 2)];
+  var bglPtr = (growMemViews(), HEAPU32)[(((descriptor) + (16)) >> 2)];
   var bgls = [];
   for (var i = 0; i < bglCount; ++i) {
-    bgls.push(WebGPU.getJsObject(HEAPU32[(((bglPtr) + (4 * i)) >> 2)]));
+    bgls.push(WebGPU.getJsObject((growMemViews(), HEAPU32)[(((bglPtr) + (4 * i)) >> 2)]));
   }
   var desc = {
     "label": WebGPU.makeStringFromOptionalStringView(descriptor + 4),
@@ -7075,8 +7890,8 @@ var _wgpuDeviceCreatePipelineLayout = (devicePtr, descriptor) => {
 
 var _wgpuDeviceCreateQuerySet = (devicePtr, descriptor) => {
   var desc = {
-    "type": WebGPU.QueryType[HEAP32[(((descriptor) + (12)) >> 2)]],
-    "count": HEAPU32[(((descriptor) + (16)) >> 2)]
+    "type": WebGPU.QueryType[(growMemViews(), HEAP32)[(((descriptor) + (12)) >> 2)]],
+    "count": (growMemViews(), HEAPU32)[(((descriptor) + (16)) >> 2)]
   };
   var device = WebGPU.getJsObject(devicePtr);
   var ptr = _emwgpuCreateQuerySet(0);
@@ -7085,28 +7900,28 @@ var _wgpuDeviceCreateQuerySet = (devicePtr, descriptor) => {
 };
 
 var _wgpuDeviceCreateTexture = (devicePtr, descriptor) => {
-  var nextInChainPtr = HEAPU32[((descriptor) >> 2)];
+  var nextInChainPtr = (growMemViews(), HEAPU32)[((descriptor) >> 2)];
   var textureBindingViewDimension;
   if (nextInChainPtr !== 0) {
-    var sType = HEAP32[(((nextInChainPtr) + (4)) >> 2)];
+    var sType = (growMemViews(), HEAP32)[(((nextInChainPtr) + (4)) >> 2)];
     var textureBindingViewDimensionDescriptor = nextInChainPtr;
-    textureBindingViewDimension = WebGPU.TextureViewDimension[HEAP32[(((textureBindingViewDimensionDescriptor) + (8)) >> 2)]];
+    textureBindingViewDimension = WebGPU.TextureViewDimension[(growMemViews(), HEAP32)[(((textureBindingViewDimensionDescriptor) + (8)) >> 2)]];
   }
   var desc = {
     "label": WebGPU.makeStringFromOptionalStringView(descriptor + 4),
     "size": WebGPU.makeExtent3D(descriptor + 28),
-    "mipLevelCount": HEAPU32[(((descriptor) + (44)) >> 2)],
-    "sampleCount": HEAPU32[(((descriptor) + (48)) >> 2)],
-    "dimension": WebGPU.TextureDimension[HEAP32[(((descriptor) + (24)) >> 2)]],
-    "format": WebGPU.TextureFormat[HEAP32[(((descriptor) + (40)) >> 2)]],
-    "usage": HEAPU32[(((descriptor) + (16)) >> 2)],
+    "mipLevelCount": (growMemViews(), HEAPU32)[(((descriptor) + (44)) >> 2)],
+    "sampleCount": (growMemViews(), HEAPU32)[(((descriptor) + (48)) >> 2)],
+    "dimension": WebGPU.TextureDimension[(growMemViews(), HEAP32)[(((descriptor) + (24)) >> 2)]],
+    "format": WebGPU.TextureFormat[(growMemViews(), HEAP32)[(((descriptor) + (40)) >> 2)]],
+    "usage": (growMemViews(), HEAPU32)[(((descriptor) + (16)) >> 2)],
     "textureBindingViewDimension": textureBindingViewDimension
   };
-  var viewFormatCount = HEAPU32[(((descriptor) + (52)) >> 2)];
+  var viewFormatCount = (growMemViews(), HEAPU32)[(((descriptor) + (52)) >> 2)];
   if (viewFormatCount) {
-    var viewFormatsPtr = HEAPU32[(((descriptor) + (56)) >> 2)];
+    var viewFormatsPtr = (growMemViews(), HEAPU32)[(((descriptor) + (56)) >> 2)];
     // viewFormatsPtr pointer to an array of TextureFormat which is an enum of size uint32_t
-    desc["viewFormats"] = Array.from(HEAP32.subarray((((viewFormatsPtr) >> 2)), ((viewFormatsPtr + viewFormatCount * 4) >> 2)), format => WebGPU.TextureFormat[format]);
+    desc["viewFormats"] = Array.from((growMemViews(), HEAP32).subarray((((viewFormatsPtr) >> 2)), ((viewFormatsPtr + viewFormatCount * 4) >> 2)), format => WebGPU.TextureFormat[format]);
   }
   var device = WebGPU.getJsObject(devicePtr);
   var ptr = _emwgpuCreateTexture(0);
@@ -7133,7 +7948,7 @@ var _wgpuDeviceHasFeature = (devicePtr, featureEnumValue) => {
 
 var _wgpuQueueSubmit = (queuePtr, commandCount, commands) => {
   var queue = WebGPU.getJsObject(queuePtr);
-  var cmds = Array.from(HEAP32.subarray((((commands) >> 2)), ((commands + commandCount * 4) >> 2)), id => WebGPU.getJsObject(id));
+  var cmds = Array.from((growMemViews(), HEAP32).subarray((((commands) >> 2)), ((commands + commandCount * 4) >> 2)), id => WebGPU.getJsObject(id));
   queue.submit(cmds);
 };
 
@@ -7143,7 +7958,7 @@ function _wgpuQueueWriteBuffer(queuePtr, bufferPtr, bufferOffset_low, bufferOffs
   var buffer = WebGPU.getJsObject(bufferPtr);
   // There is a size limitation for ArrayBufferView. Work around by passing in a subarray
   // instead of the whole heap. crbug.com/1201109
-  var subarray = HEAPU8.subarray(data, data + size);
+  var subarray = (growMemViews(), HEAPU8).subarray(data, data + size);
   queue.writeBuffer(buffer, bufferOffset, subarray, 0, size);
 }
 
@@ -7154,7 +7969,7 @@ var _wgpuQueueWriteTexture = (queuePtr, destinationPtr, data, dataSize, dataLayo
   var writeSize = WebGPU.makeExtent3D(writeSizePtr);
   // This subarray isn't strictly necessary, but helps work around an issue
   // where Chromium makes a copy of the entire heap. crbug.com/1134457
-  var subarray = HEAPU8.subarray(data, data + dataSize);
+  var subarray = (growMemViews(), HEAPU8).subarray(data, data + dataSize);
   queue.writeTexture(destination, subarray, dataLayout, writeSize);
 };
 
@@ -7162,29 +7977,29 @@ var _wgpuTextureCreateView = (texturePtr, descriptor) => {
   var desc;
   if (descriptor) {
     var swizzle;
-    var nextInChainPtr = HEAPU32[((descriptor) >> 2)];
+    var nextInChainPtr = (growMemViews(), HEAPU32)[((descriptor) >> 2)];
     if (nextInChainPtr !== 0) {
-      var sType = HEAP32[(((nextInChainPtr) + (4)) >> 2)];
+      var sType = (growMemViews(), HEAP32)[(((nextInChainPtr) + (4)) >> 2)];
       var swizzleDescriptor = nextInChainPtr;
       var swizzlePtr = swizzleDescriptor + 8;
-      var r = WebGPU.ComponentSwizzle[HEAP32[((swizzlePtr) >> 2)]] || "r";
-      var g = WebGPU.ComponentSwizzle[HEAP32[(((swizzlePtr) + (4)) >> 2)]] || "g";
-      var b = WebGPU.ComponentSwizzle[HEAP32[(((swizzlePtr) + (8)) >> 2)]] || "b";
-      var a = WebGPU.ComponentSwizzle[HEAP32[(((swizzlePtr) + (12)) >> 2)]] || "a";
+      var r = WebGPU.ComponentSwizzle[(growMemViews(), HEAP32)[((swizzlePtr) >> 2)]] || "r";
+      var g = WebGPU.ComponentSwizzle[(growMemViews(), HEAP32)[(((swizzlePtr) + (4)) >> 2)]] || "g";
+      var b = WebGPU.ComponentSwizzle[(growMemViews(), HEAP32)[(((swizzlePtr) + (8)) >> 2)]] || "b";
+      var a = WebGPU.ComponentSwizzle[(growMemViews(), HEAP32)[(((swizzlePtr) + (12)) >> 2)]] || "a";
       swizzle = `${r}${g}${b}${a}`;
     }
-    var mipLevelCount = HEAPU32[(((descriptor) + (24)) >> 2)];
-    var arrayLayerCount = HEAPU32[(((descriptor) + (32)) >> 2)];
+    var mipLevelCount = (growMemViews(), HEAPU32)[(((descriptor) + (24)) >> 2)];
+    var arrayLayerCount = (growMemViews(), HEAPU32)[(((descriptor) + (32)) >> 2)];
     desc = {
       "label": WebGPU.makeStringFromOptionalStringView(descriptor + 4),
-      "format": WebGPU.TextureFormat[HEAP32[(((descriptor) + (12)) >> 2)]],
-      "dimension": WebGPU.TextureViewDimension[HEAP32[(((descriptor) + (16)) >> 2)]],
-      "baseMipLevel": HEAPU32[(((descriptor) + (20)) >> 2)],
+      "format": WebGPU.TextureFormat[(growMemViews(), HEAP32)[(((descriptor) + (12)) >> 2)]],
+      "dimension": WebGPU.TextureViewDimension[(growMemViews(), HEAP32)[(((descriptor) + (16)) >> 2)]],
+      "baseMipLevel": (growMemViews(), HEAPU32)[(((descriptor) + (20)) >> 2)],
       "mipLevelCount": mipLevelCount === 4294967295 ? undefined : mipLevelCount,
-      "baseArrayLayer": HEAPU32[(((descriptor) + (28)) >> 2)],
+      "baseArrayLayer": (growMemViews(), HEAPU32)[(((descriptor) + (28)) >> 2)],
       "arrayLayerCount": arrayLayerCount === 4294967295 ? undefined : arrayLayerCount,
-      "aspect": WebGPU.TextureAspect[HEAP32[(((descriptor) + (36)) >> 2)]],
-      "usage": HEAPU32[(((descriptor) + (40)) >> 2)],
+      "aspect": WebGPU.TextureAspect[(growMemViews(), HEAP32)[(((descriptor) + (36)) >> 2)]],
+      "usage": (growMemViews(), HEAPU32)[(((descriptor) + (40)) >> 2)],
       "swizzle": swizzle
     };
   }
@@ -7217,6 +8032,8 @@ var FS_createLazyFile = (...args) => FS.createLazyFile(...args);
 
 var FS_createDevice = (...args) => FS.createDevice(...args);
 
+PThread.init();
+
 FS.createPreloadedFile = FS_createPreloadedFile;
 
 FS.preloadFile = FS_preloadFile;
@@ -7232,6 +8049,9 @@ init_RegisteredPointer();
 // This file is included after the automatically-generated JS library code
 // but before the wasm module is created.
 {
+  // With WASM_ESM_INTEGRATION this has to happen at the top level and not
+  // delayed until processModuleArgs.
+  initMemory();
   // Begin ATMODULES hooks
   if (Module["preloadPlugins"]) preloadPlugins = Module["preloadPlugins"];
   if (Module["noExitRuntime"]) noExitRuntime = Module["noExitRuntime"];
@@ -7272,8 +8092,20 @@ Module["WebGPU"] = WebGPU;
 // Begin JS library exports
 // End JS library exports
 // end include: postlibrary.js
+// proxiedFunctionTable specifies the list of functions that can be called
+// either synchronously or asynchronously from other threads in postMessage()d
+// or internally queued events. This way a pthread in a Worker can synchronously
+// access e.g. the DOM on the main thread.
+var proxiedFunctionTable = [ _proc_exit, exitOnMainThread, pthreadCreateProxied, ___syscall_dup, ___syscall_faccessat, ___syscall_fcntl64, ___syscall_fstat64, ___syscall_ftruncate64, ___syscall_getdents64, ___syscall_ioctl, ___syscall_lstat64, ___syscall_newfstatat, ___syscall_openat, ___syscall_stat64, __mmap_js, __munmap_js, _environ_get, _environ_sizes_get, _fd_close, _fd_pread, _fd_read, _fd_seek, _fd_write ];
+
 var ASM_CONSTS = {
-  645497: $0 => {
+  644728: () => {
+    if (typeof PThread !== "undefined") {
+      return navigator.hardwareConcurrency;
+    }
+    return 1;
+  },
+  644820: $0 => {
     const device = WebGPU.getJsObject($0);
     return device.features.has("subgroups");
   }
@@ -7317,232 +8149,263 @@ function __asyncjs__ReadBufferDataJs(buffer_handle, data_ptr) {
     await gpuReadBuffer.mapAsync(GPUMapMode.READ);
     const arrayBuffer = gpuReadBuffer.getMappedRange();
     const u8view = new Uint8Array(arrayBuffer);
-    HEAPU8.set(u8view, data_ptr >>> 0);
+    (growMemViews(), HEAPU8).set(u8view, data_ptr >>> 0);
     gpuReadBuffer.unmap();
   });
 }
 
 // Imports from the Wasm binary.
-var _malloc, _wgpuDeviceAddRef, _free, _emwgpuCreateBindGroup, _emwgpuCreateBindGroupLayout, _emwgpuCreateCommandBuffer, _emwgpuCreateCommandEncoder, _emwgpuCreateComputePassEncoder, _emwgpuCreateComputePipeline, _emwgpuCreateExternalTexture, _emwgpuCreatePipelineLayout, _emwgpuCreateQuerySet, _emwgpuCreateRenderBundle, _emwgpuCreateRenderBundleEncoder, _emwgpuCreateRenderPassEncoder, _emwgpuCreateRenderPipeline, _emwgpuCreateSampler, _emwgpuCreateSurface, _emwgpuCreateTexture, _emwgpuCreateTextureView, _emwgpuCreateAdapter, _emwgpuImportBuffer, _emwgpuCreateDevice, _emwgpuCreateQueue, _emwgpuCreateShaderModule, _emwgpuOnCreateComputePipelineCompleted, _emwgpuOnWorkDoneCompleted, ___getTypeName, _emscripten_builtin_memalign, _memalign, __emscripten_tempret_set, __emscripten_stack_restore, __emscripten_stack_alloc, _emscripten_stack_get_current, dynCall_iij, dynCall_ji, dynCall_vij, dynCall_jii, dynCall_viji, dynCall_iiiijj, dynCall_viijj, dynCall_viiijjj, dynCall_jjj, dynCall_jiii, dynCall_iiiijij, dynCall_viijii, dynCall_vijjj, dynCall_vj, dynCall_viij, dynCall_jiji, dynCall_iiiiij, dynCall_iiiiijj, dynCall_iiiiiijj, memory, _kVersionStampBuildChangelistStr, _kVersionStampCitcSnapshotStr, _kVersionStampCitcWorkspaceIdStr, _kVersionStampSourceUriStr, _kVersionStampBuildClientStr, _kVersionStampBuildClientMintStatusStr, _kVersionStampBuildCompilerStr, _kVersionStampBuildDateTimePstStr, _kVersionStampBuildDepotPathStr, _kVersionStampBuildIdStr, _kVersionStampBuildInfoStr, _kVersionStampBuildLabelStr, _kVersionStampBuildTargetStr, _kVersionStampBuildTimestampStr, _kVersionStampBuildToolStr, _kVersionStampG3BuildTargetStr, _kVersionStampVerifiableStr, _kVersionStampBuildFdoTypeStr, _kVersionStampBuildBaselineChangelistStr, _kVersionStampBuildLtoTypeStr, _kVersionStampBuildPropellerTypeStr, _kVersionStampBuildPghoTypeStr, _kVersionStampBuildUsernameStr, _kVersionStampBuildHostnameStr, _kVersionStampBuildDirectoryStr, _kVersionStampBuildChangelistInt, _kVersionStampCitcSnapshotInt, _kVersionStampBuildClientMintStatusInt, _kVersionStampBuildTimestampInt, _kVersionStampVerifiableInt, _kVersionStampBuildCoverageEnabledInt, _kVersionStampBuildBaselineChangelistInt, _kVersionStampPrecookedTimestampStr, _kVersionStampPrecookedClientInfoStr, __indirect_function_table, _kVersionStampBuildHasHardeningProtobuf, wasmMemory, wasmTable;
+var _pthread_self, _malloc, _wgpuDeviceAddRef, _free, _emwgpuCreateBindGroup, _emwgpuCreateBindGroupLayout, _emwgpuCreateCommandBuffer, _emwgpuCreateCommandEncoder, _emwgpuCreateComputePassEncoder, _emwgpuCreateComputePipeline, _emwgpuCreateExternalTexture, _emwgpuCreatePipelineLayout, _emwgpuCreateQuerySet, _emwgpuCreateRenderBundle, _emwgpuCreateRenderBundleEncoder, _emwgpuCreateRenderPassEncoder, _emwgpuCreateRenderPipeline, _emwgpuCreateSampler, _emwgpuCreateSurface, _emwgpuCreateTexture, _emwgpuCreateTextureView, _emwgpuCreateAdapter, _emwgpuImportBuffer, _emwgpuCreateDevice, _emwgpuCreateQueue, _emwgpuCreateShaderModule, _emwgpuOnCreateComputePipelineCompleted, _emwgpuOnWorkDoneCompleted, ___getTypeName, __embind_initialize_bindings, __emscripten_tls_init, _emscripten_builtin_memalign, __emscripten_thread_init, __emscripten_thread_crashed, __emscripten_run_js_on_main_thread_done, __emscripten_run_js_on_main_thread, __emscripten_thread_free_data, __emscripten_thread_exit, __emscripten_check_mailbox, _memalign, __emscripten_tempret_set, _emscripten_stack_set_limits, __emscripten_stack_restore, __emscripten_stack_alloc, _emscripten_stack_get_current, dynCall_iij, dynCall_ji, dynCall_vij, dynCall_jii, dynCall_viji, dynCall_iiiijj, dynCall_viijj, dynCall_viiijjj, dynCall_jjj, dynCall_jiii, dynCall_iiiijij, dynCall_viijii, dynCall_vijjj, dynCall_vj, dynCall_viij, dynCall_jiji, dynCall_iiiiij, dynCall_iiiiijj, dynCall_iiiiiijj, _kVersionStampBuildChangelistStr, _kVersionStampCitcSnapshotStr, _kVersionStampCitcWorkspaceIdStr, _kVersionStampSourceUriStr, _kVersionStampBuildClientStr, _kVersionStampBuildClientMintStatusStr, _kVersionStampBuildCompilerStr, _kVersionStampBuildDateTimePstStr, _kVersionStampBuildDepotPathStr, _kVersionStampBuildIdStr, _kVersionStampBuildInfoStr, _kVersionStampBuildLabelStr, _kVersionStampBuildTargetStr, _kVersionStampBuildTimestampStr, _kVersionStampBuildToolStr, _kVersionStampG3BuildTargetStr, _kVersionStampVerifiableStr, _kVersionStampBuildFdoTypeStr, _kVersionStampBuildBaselineChangelistStr, _kVersionStampBuildLtoTypeStr, _kVersionStampBuildPropellerTypeStr, _kVersionStampBuildPghoTypeStr, _kVersionStampBuildUsernameStr, _kVersionStampBuildHostnameStr, _kVersionStampBuildDirectoryStr, _kVersionStampBuildChangelistInt, _kVersionStampCitcSnapshotInt, _kVersionStampBuildClientMintStatusInt, _kVersionStampBuildTimestampInt, _kVersionStampVerifiableInt, _kVersionStampBuildCoverageEnabledInt, _kVersionStampBuildBaselineChangelistInt, _kVersionStampPrecookedTimestampStr, _kVersionStampPrecookedClientInfoStr, __indirect_function_table, _kVersionStampBuildHasHardeningProtobuf, wasmTable;
 
 function assignWasmExports(wasmExports) {
-  _malloc = Module["_malloc"] = wasmExports["Ub"];
-  _wgpuDeviceAddRef = wasmExports["Vb"];
-  _free = Module["_free"] = wasmExports["Wb"];
-  _emwgpuCreateBindGroup = wasmExports["Xb"];
-  _emwgpuCreateBindGroupLayout = wasmExports["Yb"];
-  _emwgpuCreateCommandBuffer = wasmExports["Zb"];
-  _emwgpuCreateCommandEncoder = wasmExports["_b"];
-  _emwgpuCreateComputePassEncoder = wasmExports["$b"];
-  _emwgpuCreateComputePipeline = wasmExports["ac"];
-  _emwgpuCreateExternalTexture = wasmExports["bc"];
-  _emwgpuCreatePipelineLayout = wasmExports["cc"];
-  _emwgpuCreateQuerySet = wasmExports["dc"];
-  _emwgpuCreateRenderBundle = wasmExports["ec"];
-  _emwgpuCreateRenderBundleEncoder = wasmExports["fc"];
-  _emwgpuCreateRenderPassEncoder = wasmExports["gc"];
-  _emwgpuCreateRenderPipeline = wasmExports["hc"];
-  _emwgpuCreateSampler = wasmExports["ic"];
-  _emwgpuCreateSurface = wasmExports["jc"];
-  _emwgpuCreateTexture = wasmExports["kc"];
-  _emwgpuCreateTextureView = wasmExports["lc"];
-  _emwgpuCreateAdapter = wasmExports["mc"];
-  _emwgpuImportBuffer = wasmExports["nc"];
-  _emwgpuCreateDevice = wasmExports["oc"];
-  _emwgpuCreateQueue = wasmExports["pc"];
-  _emwgpuCreateShaderModule = wasmExports["qc"];
-  _emwgpuOnCreateComputePipelineCompleted = wasmExports["rc"];
-  _emwgpuOnWorkDoneCompleted = wasmExports["sc"];
-  ___getTypeName = wasmExports["uc"];
-  _emscripten_builtin_memalign = wasmExports["vc"];
-  _memalign = wasmExports["wc"];
-  __emscripten_tempret_set = wasmExports["xc"];
-  __emscripten_stack_restore = wasmExports["yc"];
-  __emscripten_stack_alloc = wasmExports["zc"];
-  _emscripten_stack_get_current = wasmExports["Ac"];
-  dynCall_iij = dynCalls["iij"] = wasmExports["Bc"];
-  dynCall_ji = dynCalls["ji"] = wasmExports["Cc"];
-  dynCall_vij = dynCalls["vij"] = wasmExports["Dc"];
-  dynCall_jii = dynCalls["jii"] = wasmExports["Ec"];
-  dynCall_viji = dynCalls["viji"] = wasmExports["Fc"];
-  dynCall_iiiijj = dynCalls["iiiijj"] = wasmExports["Gc"];
-  dynCall_viijj = dynCalls["viijj"] = wasmExports["Hc"];
-  dynCall_viiijjj = dynCalls["viiijjj"] = wasmExports["Ic"];
-  dynCall_jjj = dynCalls["jjj"] = wasmExports["Jc"];
-  dynCall_jiii = dynCalls["jiii"] = wasmExports["Kc"];
-  dynCall_iiiijij = dynCalls["iiiijij"] = wasmExports["Lc"];
-  dynCall_viijii = dynCalls["viijii"] = wasmExports["Mc"];
-  dynCall_vijjj = dynCalls["vijjj"] = wasmExports["Nc"];
-  dynCall_vj = dynCalls["vj"] = wasmExports["Oc"];
-  dynCall_viij = dynCalls["viij"] = wasmExports["Pc"];
-  dynCall_jiji = dynCalls["jiji"] = wasmExports["Qc"];
-  dynCall_iiiiij = dynCalls["iiiiij"] = wasmExports["Rc"];
-  dynCall_iiiiijj = dynCalls["iiiiijj"] = wasmExports["Sc"];
-  dynCall_iiiiiijj = dynCalls["iiiiiijj"] = wasmExports["Tc"];
-  memory = wasmMemory = wasmExports["jb"];
-  _kVersionStampBuildChangelistStr = Module["_kVersionStampBuildChangelistStr"] = wasmExports["lb"].value;
-  _kVersionStampCitcSnapshotStr = Module["_kVersionStampCitcSnapshotStr"] = wasmExports["mb"].value;
-  _kVersionStampCitcWorkspaceIdStr = Module["_kVersionStampCitcWorkspaceIdStr"] = wasmExports["nb"].value;
-  _kVersionStampSourceUriStr = Module["_kVersionStampSourceUriStr"] = wasmExports["ob"].value;
-  _kVersionStampBuildClientStr = Module["_kVersionStampBuildClientStr"] = wasmExports["pb"].value;
-  _kVersionStampBuildClientMintStatusStr = Module["_kVersionStampBuildClientMintStatusStr"] = wasmExports["qb"].value;
-  _kVersionStampBuildCompilerStr = Module["_kVersionStampBuildCompilerStr"] = wasmExports["rb"].value;
-  _kVersionStampBuildDateTimePstStr = Module["_kVersionStampBuildDateTimePstStr"] = wasmExports["sb"].value;
-  _kVersionStampBuildDepotPathStr = Module["_kVersionStampBuildDepotPathStr"] = wasmExports["tb"].value;
-  _kVersionStampBuildIdStr = Module["_kVersionStampBuildIdStr"] = wasmExports["ub"].value;
-  _kVersionStampBuildInfoStr = Module["_kVersionStampBuildInfoStr"] = wasmExports["vb"].value;
-  _kVersionStampBuildLabelStr = Module["_kVersionStampBuildLabelStr"] = wasmExports["wb"].value;
-  _kVersionStampBuildTargetStr = Module["_kVersionStampBuildTargetStr"] = wasmExports["xb"].value;
-  _kVersionStampBuildTimestampStr = Module["_kVersionStampBuildTimestampStr"] = wasmExports["yb"].value;
-  _kVersionStampBuildToolStr = Module["_kVersionStampBuildToolStr"] = wasmExports["zb"].value;
-  _kVersionStampG3BuildTargetStr = Module["_kVersionStampG3BuildTargetStr"] = wasmExports["Ab"].value;
-  _kVersionStampVerifiableStr = Module["_kVersionStampVerifiableStr"] = wasmExports["Bb"].value;
-  _kVersionStampBuildFdoTypeStr = Module["_kVersionStampBuildFdoTypeStr"] = wasmExports["Cb"].value;
-  _kVersionStampBuildBaselineChangelistStr = Module["_kVersionStampBuildBaselineChangelistStr"] = wasmExports["Db"].value;
-  _kVersionStampBuildLtoTypeStr = Module["_kVersionStampBuildLtoTypeStr"] = wasmExports["Eb"].value;
-  _kVersionStampBuildPropellerTypeStr = Module["_kVersionStampBuildPropellerTypeStr"] = wasmExports["Fb"].value;
-  _kVersionStampBuildPghoTypeStr = Module["_kVersionStampBuildPghoTypeStr"] = wasmExports["Gb"].value;
-  _kVersionStampBuildUsernameStr = Module["_kVersionStampBuildUsernameStr"] = wasmExports["Hb"].value;
-  _kVersionStampBuildHostnameStr = Module["_kVersionStampBuildHostnameStr"] = wasmExports["Ib"].value;
-  _kVersionStampBuildDirectoryStr = Module["_kVersionStampBuildDirectoryStr"] = wasmExports["Jb"].value;
-  _kVersionStampBuildChangelistInt = Module["_kVersionStampBuildChangelistInt"] = wasmExports["Kb"].value;
-  _kVersionStampCitcSnapshotInt = Module["_kVersionStampCitcSnapshotInt"] = wasmExports["Lb"].value;
-  _kVersionStampBuildClientMintStatusInt = Module["_kVersionStampBuildClientMintStatusInt"] = wasmExports["Mb"].value;
-  _kVersionStampBuildTimestampInt = Module["_kVersionStampBuildTimestampInt"] = wasmExports["Nb"].value;
-  _kVersionStampVerifiableInt = Module["_kVersionStampVerifiableInt"] = wasmExports["Ob"].value;
-  _kVersionStampBuildCoverageEnabledInt = Module["_kVersionStampBuildCoverageEnabledInt"] = wasmExports["Pb"].value;
-  _kVersionStampBuildBaselineChangelistInt = Module["_kVersionStampBuildBaselineChangelistInt"] = wasmExports["Qb"].value;
-  _kVersionStampPrecookedTimestampStr = Module["_kVersionStampPrecookedTimestampStr"] = wasmExports["Rb"].value;
-  _kVersionStampPrecookedClientInfoStr = Module["_kVersionStampPrecookedClientInfoStr"] = wasmExports["Sb"].value;
-  __indirect_function_table = wasmTable = wasmExports["Tb"];
-  _kVersionStampBuildHasHardeningProtobuf = Module["_kVersionStampBuildHasHardeningProtobuf"] = wasmExports["tc"].value;
+  _pthread_self = wasmExports["dc"];
+  _malloc = Module["_malloc"] = wasmExports["ec"];
+  _wgpuDeviceAddRef = wasmExports["fc"];
+  _free = Module["_free"] = wasmExports["gc"];
+  _emwgpuCreateBindGroup = wasmExports["hc"];
+  _emwgpuCreateBindGroupLayout = wasmExports["ic"];
+  _emwgpuCreateCommandBuffer = wasmExports["jc"];
+  _emwgpuCreateCommandEncoder = wasmExports["kc"];
+  _emwgpuCreateComputePassEncoder = wasmExports["lc"];
+  _emwgpuCreateComputePipeline = wasmExports["mc"];
+  _emwgpuCreateExternalTexture = wasmExports["nc"];
+  _emwgpuCreatePipelineLayout = wasmExports["oc"];
+  _emwgpuCreateQuerySet = wasmExports["pc"];
+  _emwgpuCreateRenderBundle = wasmExports["qc"];
+  _emwgpuCreateRenderBundleEncoder = wasmExports["rc"];
+  _emwgpuCreateRenderPassEncoder = wasmExports["sc"];
+  _emwgpuCreateRenderPipeline = wasmExports["tc"];
+  _emwgpuCreateSampler = wasmExports["uc"];
+  _emwgpuCreateSurface = wasmExports["vc"];
+  _emwgpuCreateTexture = wasmExports["wc"];
+  _emwgpuCreateTextureView = wasmExports["xc"];
+  _emwgpuCreateAdapter = wasmExports["yc"];
+  _emwgpuImportBuffer = wasmExports["zc"];
+  _emwgpuCreateDevice = wasmExports["Ac"];
+  _emwgpuCreateQueue = wasmExports["Bc"];
+  _emwgpuCreateShaderModule = wasmExports["Cc"];
+  _emwgpuOnCreateComputePipelineCompleted = wasmExports["Dc"];
+  _emwgpuOnWorkDoneCompleted = wasmExports["Ec"];
+  ___getTypeName = wasmExports["Gc"];
+  __embind_initialize_bindings = wasmExports["Hc"];
+  __emscripten_tls_init = wasmExports["Ic"];
+  _emscripten_builtin_memalign = wasmExports["Jc"];
+  __emscripten_thread_init = wasmExports["Kc"];
+  __emscripten_thread_crashed = wasmExports["Lc"];
+  __emscripten_run_js_on_main_thread_done = wasmExports["Mc"];
+  __emscripten_run_js_on_main_thread = wasmExports["Nc"];
+  __emscripten_thread_free_data = wasmExports["Oc"];
+  __emscripten_thread_exit = wasmExports["Pc"];
+  __emscripten_check_mailbox = wasmExports["Qc"];
+  _memalign = wasmExports["Rc"];
+  __emscripten_tempret_set = wasmExports["Sc"];
+  _emscripten_stack_set_limits = wasmExports["Tc"];
+  __emscripten_stack_restore = wasmExports["Uc"];
+  __emscripten_stack_alloc = wasmExports["Vc"];
+  _emscripten_stack_get_current = wasmExports["Wc"];
+  dynCall_iij = dynCalls["iij"] = wasmExports["Xc"];
+  dynCall_ji = dynCalls["ji"] = wasmExports["Yc"];
+  dynCall_vij = dynCalls["vij"] = wasmExports["Zc"];
+  dynCall_jii = dynCalls["jii"] = wasmExports["_c"];
+  dynCall_viji = dynCalls["viji"] = wasmExports["$c"];
+  dynCall_iiiijj = dynCalls["iiiijj"] = wasmExports["ad"];
+  dynCall_viijj = dynCalls["viijj"] = wasmExports["bd"];
+  dynCall_viiijjj = dynCalls["viiijjj"] = wasmExports["cd"];
+  dynCall_jjj = dynCalls["jjj"] = wasmExports["dd"];
+  dynCall_jiii = dynCalls["jiii"] = wasmExports["ed"];
+  dynCall_iiiijij = dynCalls["iiiijij"] = wasmExports["fd"];
+  dynCall_viijii = dynCalls["viijii"] = wasmExports["gd"];
+  dynCall_vijjj = dynCalls["vijjj"] = wasmExports["hd"];
+  dynCall_vj = dynCalls["vj"] = wasmExports["id"];
+  dynCall_viij = dynCalls["viij"] = wasmExports["jd"];
+  dynCall_jiji = dynCalls["jiji"] = wasmExports["kd"];
+  dynCall_iiiiij = dynCalls["iiiiij"] = wasmExports["ld"];
+  dynCall_iiiiijj = dynCalls["iiiiijj"] = wasmExports["md"];
+  dynCall_iiiiiijj = dynCalls["iiiiiijj"] = wasmExports["nd"];
+  _kVersionStampBuildChangelistStr = Module["_kVersionStampBuildChangelistStr"] = wasmExports["wb"].value;
+  _kVersionStampCitcSnapshotStr = Module["_kVersionStampCitcSnapshotStr"] = wasmExports["xb"].value;
+  _kVersionStampCitcWorkspaceIdStr = Module["_kVersionStampCitcWorkspaceIdStr"] = wasmExports["yb"].value;
+  _kVersionStampSourceUriStr = Module["_kVersionStampSourceUriStr"] = wasmExports["zb"].value;
+  _kVersionStampBuildClientStr = Module["_kVersionStampBuildClientStr"] = wasmExports["Ab"].value;
+  _kVersionStampBuildClientMintStatusStr = Module["_kVersionStampBuildClientMintStatusStr"] = wasmExports["Bb"].value;
+  _kVersionStampBuildCompilerStr = Module["_kVersionStampBuildCompilerStr"] = wasmExports["Cb"].value;
+  _kVersionStampBuildDateTimePstStr = Module["_kVersionStampBuildDateTimePstStr"] = wasmExports["Db"].value;
+  _kVersionStampBuildDepotPathStr = Module["_kVersionStampBuildDepotPathStr"] = wasmExports["Eb"].value;
+  _kVersionStampBuildIdStr = Module["_kVersionStampBuildIdStr"] = wasmExports["Fb"].value;
+  _kVersionStampBuildInfoStr = Module["_kVersionStampBuildInfoStr"] = wasmExports["Gb"].value;
+  _kVersionStampBuildLabelStr = Module["_kVersionStampBuildLabelStr"] = wasmExports["Hb"].value;
+  _kVersionStampBuildTargetStr = Module["_kVersionStampBuildTargetStr"] = wasmExports["Ib"].value;
+  _kVersionStampBuildTimestampStr = Module["_kVersionStampBuildTimestampStr"] = wasmExports["Jb"].value;
+  _kVersionStampBuildToolStr = Module["_kVersionStampBuildToolStr"] = wasmExports["Kb"].value;
+  _kVersionStampG3BuildTargetStr = Module["_kVersionStampG3BuildTargetStr"] = wasmExports["Lb"].value;
+  _kVersionStampVerifiableStr = Module["_kVersionStampVerifiableStr"] = wasmExports["Mb"].value;
+  _kVersionStampBuildFdoTypeStr = Module["_kVersionStampBuildFdoTypeStr"] = wasmExports["Nb"].value;
+  _kVersionStampBuildBaselineChangelistStr = Module["_kVersionStampBuildBaselineChangelistStr"] = wasmExports["Ob"].value;
+  _kVersionStampBuildLtoTypeStr = Module["_kVersionStampBuildLtoTypeStr"] = wasmExports["Pb"].value;
+  _kVersionStampBuildPropellerTypeStr = Module["_kVersionStampBuildPropellerTypeStr"] = wasmExports["Qb"].value;
+  _kVersionStampBuildPghoTypeStr = Module["_kVersionStampBuildPghoTypeStr"] = wasmExports["Rb"].value;
+  _kVersionStampBuildUsernameStr = Module["_kVersionStampBuildUsernameStr"] = wasmExports["Sb"].value;
+  _kVersionStampBuildHostnameStr = Module["_kVersionStampBuildHostnameStr"] = wasmExports["Tb"].value;
+  _kVersionStampBuildDirectoryStr = Module["_kVersionStampBuildDirectoryStr"] = wasmExports["Ub"].value;
+  _kVersionStampBuildChangelistInt = Module["_kVersionStampBuildChangelistInt"] = wasmExports["Vb"].value;
+  _kVersionStampCitcSnapshotInt = Module["_kVersionStampCitcSnapshotInt"] = wasmExports["Wb"].value;
+  _kVersionStampBuildClientMintStatusInt = Module["_kVersionStampBuildClientMintStatusInt"] = wasmExports["Xb"].value;
+  _kVersionStampBuildTimestampInt = Module["_kVersionStampBuildTimestampInt"] = wasmExports["Yb"].value;
+  _kVersionStampVerifiableInt = Module["_kVersionStampVerifiableInt"] = wasmExports["Zb"].value;
+  _kVersionStampBuildCoverageEnabledInt = Module["_kVersionStampBuildCoverageEnabledInt"] = wasmExports["_b"].value;
+  _kVersionStampBuildBaselineChangelistInt = Module["_kVersionStampBuildBaselineChangelistInt"] = wasmExports["$b"].value;
+  _kVersionStampPrecookedTimestampStr = Module["_kVersionStampPrecookedTimestampStr"] = wasmExports["ac"].value;
+  _kVersionStampPrecookedClientInfoStr = Module["_kVersionStampPrecookedClientInfoStr"] = wasmExports["bc"].value;
+  __indirect_function_table = wasmTable = wasmExports["cc"];
+  _kVersionStampBuildHasHardeningProtobuf = Module["_kVersionStampBuildHasHardeningProtobuf"] = wasmExports["Fc"].value;
 }
 
-var wasmImports = {
-  /** @export */ ib: DefaultErrorReporter,
-  /** @export */ hb: JsGetDeviceMaxSubgroupSize,
-  /** @export */ gb: JsGetDeviceMinSubgroupSize,
-  /** @export */ fb: ThrowError,
-  /** @export */ F: __asyncjs__ReadBufferDataJs,
-  /** @export */ eb: ___syscall_dup,
-  /** @export */ db: ___syscall_faccessat,
-  /** @export */ P: ___syscall_fcntl64,
-  /** @export */ cb: ___syscall_fstat64,
-  /** @export */ ta: ___syscall_ftruncate64,
-  /** @export */ bb: ___syscall_getdents64,
-  /** @export */ ab: ___syscall_ioctl,
-  /** @export */ $a: ___syscall_lstat64,
-  /** @export */ _a: ___syscall_newfstatat,
-  /** @export */ O: ___syscall_openat,
-  /** @export */ Za: ___syscall_stat64,
-  /** @export */ Ua: __abort_js,
-  /** @export */ pa: __embind_register_bigint,
-  /** @export */ Ta: __embind_register_bool,
-  /** @export */ l: __embind_register_class,
-  /** @export */ s: __embind_register_class_class_function,
-  /** @export */ x: __embind_register_class_constructor,
-  /** @export */ b: __embind_register_class_function,
-  /** @export */ Sa: __embind_register_emval,
-  /** @export */ D: __embind_register_enum,
-  /** @export */ c: __embind_register_enum_value,
-  /** @export */ M: __embind_register_float,
-  /** @export */ r: __embind_register_function,
-  /** @export */ o: __embind_register_integer,
-  /** @export */ w: __embind_register_iterable,
-  /** @export */ d: __embind_register_memory_view,
-  /** @export */ v: __embind_register_optional,
-  /** @export */ Ra: __embind_register_std_string,
-  /** @export */ C: __embind_register_std_wstring,
-  /** @export */ Qa: __embind_register_void,
-  /** @export */ h: __emval_create_invoker,
-  /** @export */ a: __emval_decref,
-  /** @export */ Pa: __emval_get_global,
-  /** @export */ Oa: __emval_get_module_property,
-  /** @export */ k: __emval_get_property,
-  /** @export */ j: __emval_incref,
-  /** @export */ Na: __emval_instanceof,
-  /** @export */ g: __emval_invoke,
-  /** @export */ Ma: __emval_new_array,
-  /** @export */ m: __emval_new_cstring,
-  /** @export */ f: __emval_run_destructors,
-  /** @export */ L: __emval_typeof,
-  /** @export */ oa: __gmtime_js,
-  /** @export */ na: __localtime_js,
-  /** @export */ ma: __mktime_js,
-  /** @export */ la: __mmap_js,
-  /** @export */ ka: __munmap_js,
-  /** @export */ La: __tzset_js,
-  /** @export */ sa: _clock_time_get,
-  /** @export */ Ka: custom_emscripten_dbgn,
-  /** @export */ Ja: _emscripten_asm_const_int,
-  /** @export */ B: _emscripten_errn,
-  /** @export */ Ia: _emscripten_get_heap_max,
-  /** @export */ i: _emscripten_get_now,
-  /** @export */ Ha: _emscripten_has_asyncify,
-  /** @export */ Ga: _emscripten_outn,
-  /** @export */ Fa: _emscripten_pc_get_function,
-  /** @export */ Ea: _emscripten_resize_heap,
-  /** @export */ K: _emscripten_stack_snapshot,
-  /** @export */ Da: _emscripten_stack_unwind_buffer,
-  /** @export */ Ca: _emscripten_webgpu_get_device,
-  /** @export */ Ba: _emwgpuBufferDestroy,
-  /** @export */ Aa: _emwgpuBufferGetMappedRange,
-  /** @export */ za: _emwgpuBufferUnmap,
-  /** @export */ ya: _emwgpuBufferWriteMappedRange,
-  /** @export */ e: _emwgpuDelete,
-  /** @export */ xa: _emwgpuDeviceCreateBuffer,
-  /** @export */ ja: _emwgpuDeviceCreateComputePipelineAsync,
-  /** @export */ wa: _emwgpuDeviceCreateShaderModule,
-  /** @export */ va: _emwgpuDeviceDestroy,
-  /** @export */ ia: _emwgpuQueueOnSubmittedWorkDone,
-  /** @export */ ua: _emwgpuWaitAny,
-  /** @export */ Ya: _environ_get,
-  /** @export */ Xa: _environ_sizes_get,
-  /** @export */ J: _exit,
-  /** @export */ y: _fd_close,
-  /** @export */ ra: _fd_pread,
-  /** @export */ N: _fd_read,
-  /** @export */ qa: _fd_seek,
-  /** @export */ E: _fd_write,
-  /** @export */ Wa: _proc_exit,
-  /** @export */ Va: _random_get,
-  /** @export */ ha: _wgpuBufferGetSize,
-  /** @export */ ga: _wgpuBufferGetUsage,
-  /** @export */ u: _wgpuCommandEncoderBeginComputePass,
-  /** @export */ A: _wgpuCommandEncoderClearBuffer,
-  /** @export */ fa: _wgpuCommandEncoderCopyBufferToBuffer,
-  /** @export */ ca: _wgpuCommandEncoderCopyBufferToTexture,
-  /** @export */ ba: _wgpuCommandEncoderCopyTextureToBuffer,
-  /** @export */ q: _wgpuCommandEncoderFinish,
-  /** @export */ ea: _wgpuCommandEncoderResolveQuerySet,
-  /** @export */ I: _wgpuComputePassEncoderDispatchWorkgroups,
-  /** @export */ t: _wgpuComputePassEncoderEnd,
-  /** @export */ aa: _wgpuComputePassEncoderSetBindGroup,
-  /** @export */ H: _wgpuComputePassEncoderSetPipeline,
-  /** @export */ $: _wgpuDeviceCreateBindGroup,
-  /** @export */ _: _wgpuDeviceCreateBindGroupLayout,
-  /** @export */ p: _wgpuDeviceCreateCommandEncoder,
-  /** @export */ Z: _wgpuDeviceCreateComputePipeline,
-  /** @export */ Y: _wgpuDeviceCreatePipelineLayout,
-  /** @export */ X: _wgpuDeviceCreateQuerySet,
-  /** @export */ W: _wgpuDeviceCreateTexture,
-  /** @export */ G: _wgpuDeviceGetAdapterInfo,
-  /** @export */ V: _wgpuDeviceGetLimits,
-  /** @export */ U: _wgpuDeviceHasFeature,
-  /** @export */ n: _wgpuQueueSubmit,
-  /** @export */ da: _wgpuQueueWriteBuffer,
-  /** @export */ T: _wgpuQueueWriteTexture,
-  /** @export */ S: _wgpuTextureCreateView,
-  /** @export */ R: _wgpuTextureGetDepthOrArrayLayers,
-  /** @export */ z: _wgpuTextureGetHeight,
-  /** @export */ Q: _wgpuTextureGetWidth
-};
+var wasmImports;
+
+function assignWasmImports() {
+  wasmImports = {
+    /** @export */ ub: DefaultErrorReporter,
+    /** @export */ tb: JsGetDeviceMaxSubgroupSize,
+    /** @export */ sb: JsGetDeviceMinSubgroupSize,
+    /** @export */ rb: ThrowError,
+    /** @export */ H: __asyncjs__ReadBufferDataJs,
+    /** @export */ qb: ___pthread_create_js,
+    /** @export */ pb: ___syscall_dup,
+    /** @export */ ob: ___syscall_faccessat,
+    /** @export */ U: ___syscall_fcntl64,
+    /** @export */ nb: ___syscall_fstat64,
+    /** @export */ ya: ___syscall_ftruncate64,
+    /** @export */ mb: ___syscall_getdents64,
+    /** @export */ lb: ___syscall_ioctl,
+    /** @export */ kb: ___syscall_lstat64,
+    /** @export */ jb: ___syscall_newfstatat,
+    /** @export */ T: ___syscall_openat,
+    /** @export */ ib: ___syscall_stat64,
+    /** @export */ db: __abort_js,
+    /** @export */ ua: __embind_register_bigint,
+    /** @export */ cb: __embind_register_bool,
+    /** @export */ l: __embind_register_class,
+    /** @export */ t: __embind_register_class_class_function,
+    /** @export */ y: __embind_register_class_constructor,
+    /** @export */ c: __embind_register_class_function,
+    /** @export */ bb: __embind_register_emval,
+    /** @export */ F: __embind_register_enum,
+    /** @export */ d: __embind_register_enum_value,
+    /** @export */ R: __embind_register_float,
+    /** @export */ s: __embind_register_function,
+    /** @export */ p: __embind_register_integer,
+    /** @export */ x: __embind_register_iterable,
+    /** @export */ e: __embind_register_memory_view,
+    /** @export */ w: __embind_register_optional,
+    /** @export */ ab: __embind_register_std_string,
+    /** @export */ E: __embind_register_std_wstring,
+    /** @export */ $a: __embind_register_void,
+    /** @export */ _a: __emscripten_init_main_thread_js,
+    /** @export */ Za: __emscripten_notify_mailbox_postmessage,
+    /** @export */ Q: __emscripten_receive_on_main_thread_js,
+    /** @export */ P: __emscripten_thread_cleanup,
+    /** @export */ Ya: __emscripten_thread_mailbox_await,
+    /** @export */ Xa: __emscripten_thread_set_strongref,
+    /** @export */ i: __emval_create_invoker,
+    /** @export */ b: __emval_decref,
+    /** @export */ Wa: __emval_get_global,
+    /** @export */ Va: __emval_get_module_property,
+    /** @export */ k: __emval_get_property,
+    /** @export */ j: __emval_incref,
+    /** @export */ Ua: __emval_instanceof,
+    /** @export */ h: __emval_invoke,
+    /** @export */ Ta: __emval_new_array,
+    /** @export */ n: __emval_new_cstring,
+    /** @export */ g: __emval_run_destructors,
+    /** @export */ O: __emval_typeof,
+    /** @export */ ta: __gmtime_js,
+    /** @export */ sa: __localtime_js,
+    /** @export */ ra: __mktime_js,
+    /** @export */ qa: __mmap_js,
+    /** @export */ pa: __munmap_js,
+    /** @export */ Sa: __tzset_js,
+    /** @export */ xa: _clock_time_get,
+    /** @export */ Ra: custom_emscripten_dbgn,
+    /** @export */ Qa: _emscripten_asm_const_int,
+    /** @export */ Pa: _emscripten_asm_const_int_sync_on_main_thread,
+    /** @export */ N: _emscripten_check_blocking_allowed,
+    /** @export */ D: _emscripten_errn,
+    /** @export */ Oa: _emscripten_exit_with_live_runtime,
+    /** @export */ Na: _emscripten_get_heap_max,
+    /** @export */ m: _emscripten_get_now,
+    /** @export */ Ma: _emscripten_has_asyncify,
+    /** @export */ M: _emscripten_num_logical_cores,
+    /** @export */ La: _emscripten_outn,
+    /** @export */ Ka: _emscripten_pc_get_function,
+    /** @export */ Ja: _emscripten_resize_heap,
+    /** @export */ L: _emscripten_stack_snapshot,
+    /** @export */ Ia: _emscripten_stack_unwind_buffer,
+    /** @export */ Ha: _emscripten_webgpu_get_device,
+    /** @export */ Ga: _emwgpuBufferDestroy,
+    /** @export */ Fa: _emwgpuBufferGetMappedRange,
+    /** @export */ Ea: _emwgpuBufferUnmap,
+    /** @export */ Da: _emwgpuBufferWriteMappedRange,
+    /** @export */ f: _emwgpuDelete,
+    /** @export */ Ca: _emwgpuDeviceCreateBuffer,
+    /** @export */ oa: _emwgpuDeviceCreateComputePipelineAsync,
+    /** @export */ Ba: _emwgpuDeviceCreateShaderModule,
+    /** @export */ Aa: _emwgpuDeviceDestroy,
+    /** @export */ na: _emwgpuQueueOnSubmittedWorkDone,
+    /** @export */ za: _emwgpuWaitAny,
+    /** @export */ hb: _environ_get,
+    /** @export */ gb: _environ_sizes_get,
+    /** @export */ C: _exit,
+    /** @export */ z: _fd_close,
+    /** @export */ wa: _fd_pread,
+    /** @export */ S: _fd_read,
+    /** @export */ va: _fd_seek,
+    /** @export */ G: _fd_write,
+    /** @export */ a: wasmMemory,
+    /** @export */ fb: _proc_exit,
+    /** @export */ eb: _random_get,
+    /** @export */ ma: _wgpuBufferGetSize,
+    /** @export */ la: _wgpuBufferGetUsage,
+    /** @export */ v: _wgpuCommandEncoderBeginComputePass,
+    /** @export */ B: _wgpuCommandEncoderClearBuffer,
+    /** @export */ ka: _wgpuCommandEncoderCopyBufferToBuffer,
+    /** @export */ ha: _wgpuCommandEncoderCopyBufferToTexture,
+    /** @export */ ga: _wgpuCommandEncoderCopyTextureToBuffer,
+    /** @export */ r: _wgpuCommandEncoderFinish,
+    /** @export */ ja: _wgpuCommandEncoderResolveQuerySet,
+    /** @export */ K: _wgpuComputePassEncoderDispatchWorkgroups,
+    /** @export */ u: _wgpuComputePassEncoderEnd,
+    /** @export */ fa: _wgpuComputePassEncoderSetBindGroup,
+    /** @export */ J: _wgpuComputePassEncoderSetPipeline,
+    /** @export */ ea: _wgpuDeviceCreateBindGroup,
+    /** @export */ da: _wgpuDeviceCreateBindGroupLayout,
+    /** @export */ q: _wgpuDeviceCreateCommandEncoder,
+    /** @export */ ca: _wgpuDeviceCreateComputePipeline,
+    /** @export */ ba: _wgpuDeviceCreatePipelineLayout,
+    /** @export */ aa: _wgpuDeviceCreateQuerySet,
+    /** @export */ $: _wgpuDeviceCreateTexture,
+    /** @export */ I: _wgpuDeviceGetAdapterInfo,
+    /** @export */ _: _wgpuDeviceGetLimits,
+    /** @export */ Z: _wgpuDeviceHasFeature,
+    /** @export */ o: _wgpuQueueSubmit,
+    /** @export */ ia: _wgpuQueueWriteBuffer,
+    /** @export */ Y: _wgpuQueueWriteTexture,
+    /** @export */ X: _wgpuTextureCreateView,
+    /** @export */ W: _wgpuTextureGetDepthOrArrayLayers,
+    /** @export */ A: _wgpuTextureGetHeight,
+    /** @export */ V: _wgpuTextureGetWidth
+  };
+}
 
 // include: postamble.js
 // === Auto-generated postamble setup entry stuff ===
 function run() {
   if (runDependencies > 0) {
     dependenciesFulfilled = run;
+    return;
+  }
+  if ((ENVIRONMENT_IS_PTHREAD)) {
+    readyPromiseResolve?.(Module);
+    initRuntime();
     return;
   }
   preRun();
@@ -7574,11 +8437,14 @@ function run() {
 
 var wasmExports;
 
-// In modularize mode the generated code is within a factory function so we
-// can use await here (since it's not top-level-await).
-wasmExports = await (createWasm());
-
-run();
+if ((!(ENVIRONMENT_IS_PTHREAD))) {
+  // Call createWasm on startup if we are the main thread.
+  // Worker threads call this once they receive the module via postMessage
+  // In modularize mode the generated code is within a factory function so we
+  // can use await here (since it's not top-level-await).
+  wasmExports = await (createWasm());
+  run();
+}
 
 // end include: postamble.js
 // include: postamble_modularize.js
@@ -7601,12 +8467,4 @@ if (runtimeInitialized) {
   };
 })();
 
-// Export using a UMD style export, or ES6 exports if selected
-if (typeof exports === 'object' && typeof module === 'object') {
-  module.exports = ModuleFactory;
-  // This default export looks redundant, but it allows TS to import this
-  // commonjs style module.
-  module.exports.default = ModuleFactory;
-} else if (typeof define === 'function' && define['amd'])
-  define([], () => ModuleFactory);
-
+export default ModuleFactory;
