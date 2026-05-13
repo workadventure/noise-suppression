@@ -7,7 +7,7 @@ var ModuleFactory = (() => {
   // When MODULARIZE this JS may be executed later,
   // after document.currentScript is gone, so we save it.
   // In EXPORT_ES6 mode we can just use 'import.meta.url'.
-  var _scriptName = globalThis.document?.currentScript?.src;
+  var _scriptName = import.meta.url;
   return async function(moduleArg = {}) {
     var moduleRtn;
 
@@ -7601,12 +7601,4 @@ if (runtimeInitialized) {
   };
 })();
 
-// Export using a UMD style export, or ES6 exports if selected
-if (typeof exports === 'object' && typeof module === 'object') {
-  module.exports = ModuleFactory;
-  // This default export looks redundant, but it allows TS to import this
-  // commonjs style module.
-  module.exports.default = ModuleFactory;
-} else if (typeof define === 'function' && define['amd'])
-  define([], () => ModuleFactory);
-
+export default ModuleFactory;

@@ -1,11 +1,5 @@
-import bundledLiteRtWasmUrl from "../forks/litertjs-core/wasm/litert_wasm_internal.wasm?url";
-import bundledModel1InlineUrl from "../model/model_quant_1.tflite?inline";
-import bundledModel2InlineUrl from "../model/model_quant_2.tflite?inline";
-import processorModuleUrl from "./audio-worklet-processor.ts?worker&url";
-import {
-  resolveBrowserCpuThreadCount,
-  resolveThreadSetting,
-} from "./browser-runtime-options";
+import audioWorkletProcessorModuleUrl from "virtual:noise-suppression-audio-worklet-module-url";
+import { resolveBrowserCpuThreadCount } from "./browser-runtime-options";
 import {
   NOISE_SUPPRESSION_AUDIO_WORKLET_PROCESSOR_NAME,
   type NoiseSuppressionAudioWorkletBenchmarkCompleteMessage,
@@ -24,9 +18,6 @@ interface AudioWorkletCapableContext extends BaseAudioContext {
 
 export interface NoiseSuppressionAudioWorkletOptions {
   moduleUrl?: string;
-  liteRtWasmUrl?: string;
-  model1Url?: string;
-  model2Url?: string;
   threads?: boolean;
   numThreads?: number;
   bypassUntilReady?: boolean;
@@ -62,15 +53,6 @@ function getModuleLoadPromise(
   const loading = context.audioWorklet.addModule(moduleUrl);
   contextCache.set(moduleUrl, loading);
   return loading;
-}
-
-async function fetchBinaryAsset(url: string): Promise<Uint8Array> {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch asset ${url}: ${response.status}`);
-  }
-
-  return new Uint8Array(await response.arrayBuffer());
 }
 
 function isReadyMessage(
@@ -137,31 +119,15 @@ export async function createNoiseSuppressionAudioWorklet(
   context: AudioWorkletCapableContext,
   options: NoiseSuppressionAudioWorkletOptions = {}
 ): Promise<NoiseSuppressionAudioWorkletHandle> {
-  const moduleUrl = options.moduleUrl ?? processorModuleUrl;
+  const moduleUrl = options.moduleUrl ?? audioWorkletProcessorModuleUrl;
   const readyTimeoutMs = options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
-  const threads = resolveThreadSetting(options.threads);
+  const threads = options.threads === true;
   const numThreads = resolveBrowserCpuThreadCount(options.numThreads);
   const bypassUntilReady = options.bypassUntilReady ?? true;
-  const model1Url = options.model1Url ?? bundledModel1InlineUrl;
-  const model2Url = options.model2Url ?? bundledModel2InlineUrl;
-  const liteRtWasmUrl = options.liteRtWasmUrl ?? bundledLiteRtWasmUrl;
 
-  const assetPromises = [
-    fetchBinaryAsset(model1Url),
-    fetchBinaryAsset(model2Url),
-    fetchBinaryAsset(liteRtWasmUrl),
-  ] as const;
-
-  const [assetResults] = await Promise.all([
-    Promise.all(assetPromises),
-    getModuleLoadPromise(context, moduleUrl),
-  ]);
-  const [model1Data, model2Data, liteRtWasmBinary] = assetResults;
+  await getModuleLoadPromise(context, moduleUrl);
 
   const processorOptions: NoiseSuppressionAudioWorkletProcessorOptions = {
-    liteRtWasmBinary,
-    model1Data,
-    model2Data,
     threads,
     numThreads,
     bypassUntilReady,

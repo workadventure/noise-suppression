@@ -22,3 +22,4 @@ technical decisions in this repository.
 - [ADR 0004: Implement AudioWorklet LiteRT Fork and Benchmark](./0004-implement-audio-worklet-litert-fork-and-benchmark.md)
 - [ADR 0005: Add Browser Automation Tests with Vitest and Playwright](./0005-add-browser-automation-tests-with-vitest-and-playwright.md)
 - [ADR 0006: Buffer AudioWorklet Input and Output Around 512-Sample DTLN Frames](./0006-buffer-audio-worklet-input-and-output-around-512-sample-dtln-frames.md)
+- [ADR 0007: Use LiteRT ESM Fork for AudioWorklet](./0007-use-litert-esm-fork-for-audioworklet.md)

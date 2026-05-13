@@ -4,9 +4,6 @@ export const NOISE_SUPPRESSION_AUDIO_WORKLET_PROCESSOR_NAME =
   "workadventure-noise-suppression";
 
 export interface NoiseSuppressionAudioWorkletProcessorOptions {
-  liteRtWasmBinary: Uint8Array;
-  model1Data: Uint8Array;
-  model2Data: Uint8Array;
   threads: boolean;
   numThreads: number;
   bypassUntilReady: boolean;

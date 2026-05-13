@@ -1,9 +1,9 @@
 import {
   Tensor,
+  getGlobalLiteRt,
   getGlobalLiteRtPromise,
   loadAndCompile,
   loadLiteRt,
-  loadLiteRtFromBundledAssets,
   type CompileOptions,
   type CompiledModel,
   type DType,
@@ -35,7 +35,18 @@ const PROFILE_STAGES = [
 type ProfileStageName = (typeof PROFILE_STAGES)[number];
 
 interface InternalSyncSignatureRunner extends SignatureRunner {
-  runWithArray(input: Tensor[]): Tensor[];
+  signatureIndex: number;
+  liteRtModel: {
+    getInputTensorType(signatureIndex: number, inputIndex: number): { delete(): void };
+  };
+  liteRtCompiledModel: {
+    getInputBufferRequirements(
+      signatureIndex: number,
+      inputIndex: number
+    ): { delete(): void };
+    run(signatureIndex: number, inputTensors: unknown[]): unknown[] | Promise<unknown[]>;
+  };
+  options: Required<CompileOptions>;
 }
 
 interface ModelTensorDetails {
@@ -45,11 +56,13 @@ interface ModelTensorDetails {
   shape: number[];
 }
 
+type LiteRtWasmModuleFactory = (moduleArg?: unknown) => Promise<unknown>;
+
 export interface NoiseSuppressionRuntimeOptions {
   liteRtWasmRoot: string;
   model1Url?: string;
   model2Url?: string;
-  liteRtLoaderSource?: string;
+  liteRtWasmModuleFactory?: LiteRtWasmModuleFactory;
   liteRtWasmBinary?: Uint8Array;
   model1Data?: Uint8Array;
   model2Data?: Uint8Array;
@@ -136,7 +149,7 @@ function resolveCpuThreadCount(requested: number | undefined): number {
 
 async function ensureLiteRtLoaded(options: {
   wasmRoot: string;
-  loaderSource?: string;
+  wasmModuleFactory?: LiteRtWasmModuleFactory;
   wasmBinary?: Uint8Array;
   threads: boolean;
 }): Promise<unknown> {
@@ -145,8 +158,22 @@ async function ensureLiteRtLoaded(options: {
     return existing;
   }
 
-  if (options.loaderSource && options.wasmBinary) {
-    return loadLiteRtFromBundledAssets(options.loaderSource, options.wasmBinary, {
+  if (options.wasmModuleFactory) {
+    if (options.threads) {
+      throw new Error(
+        "Threaded bundled LiteRT loading is not supported yet in the worklet path."
+      );
+    }
+
+    const moduleFactory = options.wasmBinary
+      ? (moduleArg?: unknown) =>
+          options.wasmModuleFactory!({
+            ...(typeof moduleArg === "object" && moduleArg !== null ? moduleArg : {}),
+            wasmBinary: options.wasmBinary,
+          })
+      : options.wasmModuleFactory;
+
+    return loadLiteRt(moduleFactory as Parameters<typeof loadLiteRt>[0], {
       threads: options.threads,
     });
   }
@@ -184,7 +211,13 @@ function getSyncRunner(
     }
   ).defaultSignature;
 
-  if (!runner || typeof runner.runWithArray !== "function") {
+  if (
+    !runner ||
+    typeof runner.signatureIndex !== "number" ||
+    !runner.liteRtModel ||
+    !runner.liteRtCompiledModel ||
+    typeof runner.liteRtCompiledModel.run !== "function"
+  ) {
     throw new Error(
       `LiteRT.js internal sync runner is unavailable for ${label}. ` +
         "This package currently depends on that API to keep dtln_denoise synchronous."
@@ -192,6 +225,68 @@ function getSyncRunner(
   }
 
   return runner;
+}
+
+function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "then" in value &&
+    typeof value.then === "function"
+  );
+}
+
+function runSignatureSync(runner: InternalSyncSignatureRunner, input: Tensor[]): Tensor[] {
+  const liteRtWasm = getGlobalLiteRt().liteRtWasm as {
+    checkTensorBufferCompatible(
+      tensorBuffer: unknown,
+      expectedTensorType: unknown,
+      inputRequirements: unknown
+    ): void;
+  };
+
+  for (let i = 0; i < input.length; i++) {
+    const inputTensor = input[i]!;
+    const expectedRankedTensorType = runner.liteRtModel.getInputTensorType(
+      runner.signatureIndex,
+      i
+    );
+    const inputRequirements = runner.liteRtCompiledModel.getInputBufferRequirements(
+      runner.signatureIndex,
+      i
+    );
+
+    try {
+      liteRtWasm.checkTensorBufferCompatible(
+        inputTensor.liteRtTensorBuffer,
+        expectedRankedTensorType,
+        inputRequirements
+      );
+    } finally {
+      expectedRankedTensorType.delete();
+      inputRequirements.delete();
+    }
+  }
+
+  const outputTensorBuffers = runner.liteRtCompiledModel.run(
+    runner.signatureIndex,
+    input.map((tensor) => tensor.liteRtTensorBuffer)
+  );
+
+  if (isPromiseLike(outputTensorBuffers)) {
+    throw new Error(
+      "LiteRT.js returned an async model invocation. AudioWorklet inference requires a synchronous wasm run path."
+    );
+  }
+
+  const TensorFromBuffer = Tensor as unknown as new (
+    tensorBuffer: unknown,
+    environment?: unknown
+  ) => Tensor;
+
+  return outputTensorBuffers.map(
+    (tensorBuffer) => new TensorFromBuffer(tensorBuffer, runner.options.environment)
+  );
 }
 
 function ensureFloat32Array(name: string, value: unknown): asserts value is Float32Array {
@@ -413,7 +508,7 @@ class NoiseSuppressionInstance {
 
     let model1Outputs: Tensor[];
     try {
-      model1Outputs = this.model1Runner.runWithArray(model1Inputs);
+      model1Outputs = runSignatureSync(this.model1Runner, model1Inputs);
     } finally {
       deleteTensors(model1Inputs);
     }
@@ -475,7 +570,7 @@ class NoiseSuppressionInstance {
 
     let model2Outputs: Tensor[];
     try {
-      model2Outputs = this.model2Runner.runWithArray(model2Inputs);
+      model2Outputs = runSignatureSync(this.model2Runner, model2Inputs);
     } finally {
       deleteTensors(model2Inputs);
     }
@@ -532,15 +627,15 @@ export async function createNoiseSuppressionRuntime(
     throw new Error("Missing model2 source. Provide model2Url or model2Data.");
   }
 
-  if (!options.liteRtLoaderSource && !liteRtWasmRoot) {
+  if (!options.liteRtWasmModuleFactory && !liteRtWasmRoot) {
     throw new Error(
-      "Missing LiteRT runtime source. Provide liteRtWasmRoot or bundled loader assets."
+      "Missing LiteRT runtime source. Provide liteRtWasmRoot or liteRtWasmModuleFactory."
     );
   }
 
   const liteRtLoadOptions: {
     wasmRoot: string;
-    loaderSource?: string;
+    wasmModuleFactory?: LiteRtWasmModuleFactory;
     wasmBinary?: Uint8Array;
     threads: boolean;
   } = {
@@ -548,8 +643,8 @@ export async function createNoiseSuppressionRuntime(
     threads,
   };
 
-  if (options.liteRtLoaderSource !== undefined) {
-    liteRtLoadOptions.loaderSource = options.liteRtLoaderSource;
+  if (options.liteRtWasmModuleFactory !== undefined) {
+    liteRtLoadOptions.wasmModuleFactory = options.liteRtWasmModuleFactory;
   }
 
   if (options.liteRtWasmBinary !== undefined) {
