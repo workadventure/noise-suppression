@@ -1,6 +1,6 @@
 {
   "name": "@workadventure/noise-suppression",
-  "version": "0.3.1",
+  "version": "0.0.1",
   "description": "Browser noise suppression powered by LiteRT.js and DTLN models",
   "type": "module",
   "main": "./dist/index.js",
