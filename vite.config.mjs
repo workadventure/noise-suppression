@@ -135,7 +135,7 @@ function audioWorkletBundlePlugin() {
 
       return null;
     },
-    load(id) {
+    async load(id) {
       if (id !== resolvedAudioWorkletModuleUrlVirtualId) {
         return null;
       }
@@ -144,9 +144,11 @@ function audioWorkletBundlePlugin() {
         return `export default ${JSON.stringify(devAudioWorkletModulePath)};`;
       }
 
+      bundledCodePromise ??= buildAudioWorkletDevBundle();
       audioWorkletAssetReferenceId ??= this.emitFile({
         type: "asset",
         fileName: audioWorkletProcessorFileName,
+        source: await bundledCodePromise,
       });
 
       return `export default import.meta.ROLLUP_FILE_URL_${audioWorkletAssetReferenceId};`;
@@ -165,14 +167,6 @@ function audioWorkletBundlePlugin() {
           next(error);
         }
       });
-    },
-    async generateBundle() {
-      if (!audioWorkletAssetReferenceId) {
-        return;
-      }
-
-      bundledCodePromise ??= buildAudioWorkletDevBundle();
-      this.setAssetSource(audioWorkletAssetReferenceId, await bundledCodePromise);
     },
   };
 }
