@@ -192,6 +192,28 @@ const worklet = await createNoiseSuppressionAudioWorklet(context, {
 });
 ```
 
+### Vite Dev Server
+
+Vite can transform JavaScript loaded through `audioWorklet.addModule()` in dev
+mode. The transformed module may import Vite's client runtime, which is not
+available inside an `AudioWorkletGlobalScope`.
+
+Add the package Vite plugin:
+
+```ts
+// vite.config.ts
+import { noiseSuppressionAudioWorkletVitePlugin } from "@workadventure/noise-suppression/vite";
+
+export default defineConfig({
+  plugins: [noiseSuppressionAudioWorkletVitePlugin()],
+});
+```
+
+The plugin serves the packaged worklet processor as raw JavaScript in dev and
+rewrites the package's default AudioWorklet URL to that raw endpoint. Application
+code can keep calling `createNoiseSuppressionAudioWorklet()` without a
+dev-specific `moduleUrl` override.
+
 ## Advanced: Synchronous Frame API
 
 The package also exposes the lower-level runtime API. This is useful for tests,

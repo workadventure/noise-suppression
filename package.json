@@ -17,6 +17,11 @@
       "import": "./dist/audio-worklet.js",
       "default": "./dist/audio-worklet.js"
     },
+    "./vite": {
+      "types": "./dist/vite.d.ts",
+      "import": "./dist/vite.js",
+      "default": "./dist/vite.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
