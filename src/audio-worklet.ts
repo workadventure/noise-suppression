@@ -1,4 +1,5 @@
 import audioWorkletProcessorModuleUrl from "virtual:noise-suppression-audio-worklet-module-url";
+import { NOISE_SUPPRESSION_AUDIO_WORKLET_DEV_MODULE_URL } from "./audio-worklet-dev-module-url";
 import { resolveBrowserCpuThreadCount } from "./browser-runtime-options";
 import {
   NOISE_SUPPRESSION_AUDIO_WORKLET_PROCESSOR_NAME,
@@ -247,3 +248,4 @@ export type {
 } from "./audio-worklet-shared";
 
 export { NOISE_SUPPRESSION_AUDIO_WORKLET_PROCESSOR_NAME };
+export { NOISE_SUPPRESSION_AUDIO_WORKLET_DEV_MODULE_URL };

@@ -326,6 +326,7 @@ export default defineConfig(({ command }) => {
         entry: {
           index: path.resolve(rootDir, "src/index.ts"),
           "audio-worklet": path.resolve(rootDir, "src/audio-worklet.ts"),
+          vite: path.resolve(rootDir, "src/vite.ts"),
         },
         name: "NoiseSuppression",
         formats: ["es"],
@@ -334,7 +335,7 @@ export default defineConfig(({ command }) => {
       target: "es2022",
       sourcemap: true,
       rollupOptions: {
-        external: ["fft.js"],
+        external: ["fft.js", "node:fs", "node:url"],
         output: {
           assetFileNames(assetInfo) {
             const originalFileName =

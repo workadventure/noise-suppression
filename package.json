@@ -17,6 +17,11 @@
       "import": "./dist/audio-worklet.js",
       "default": "./dist/audio-worklet.js"
     },
+    "./vite": {
+      "types": "./dist/vite.d.ts",
+      "import": "./dist/vite.js",
+      "default": "./dist/vite.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -57,6 +62,7 @@
   },
   "devDependencies": {
     "@litertjs/core": "^2.0.0",
+    "@types/node": "^25.9.2",
     "@vitest/browser": "^4.1.0",
     "@vitest/browser-playwright": "^4.1.0",
     "playwright": "^1.58.2",
