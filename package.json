@@ -45,12 +45,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/WorkAdventure/noise-suppression.git"
+    "url": "git+https://github.com/workadventure/noise-suppression.git"
   },
   "bugs": {
-    "url": "https://github.com/WorkAdventure/noise-suppression/issues"
+    "url": "https://github.com/workadventure/noise-suppression/issues"
   },
-  "homepage": "https://github.com/WorkAdventure/noise-suppression#readme",
+  "homepage": "https://github.com/workAdventure/noise-suppression#readme",
   "license": "MIT",
   "dependencies": {
     "fft.js": "^4.0.4"
