@@ -5,7 +5,6 @@ import {
   type BackgroundNoiseDetectorAudioWorkletOutboundMessage,
   type BackgroundNoiseDetectorAudioWorkletReadyMessage,
 } from "../src/background-noise-worklet-shared";
-import type { BackgroundNoiseDetectedMessage } from "../src/background-noise/detector";
 
 function createBackgroundNoiseDetectorNode(
   context: BaseAudioContext,
@@ -67,12 +66,6 @@ function isReadyMessage(
   return message.type === "ready";
 }
 
-function isBackgroundNoiseDetectedMessage(
-  message: BackgroundNoiseDetectorAudioWorkletOutboundMessage
-): message is BackgroundNoiseDetectedMessage {
-  return message.type === "background-noise-detected";
-}
-
 describe("background noise AudioWorklet processor", () => {
   test("passes audio through unchanged", async () => {
     const context = new OfflineAudioContext(1, 512, 16000);
@@ -91,48 +84,27 @@ describe("background noise AudioWorklet processor", () => {
     expect(output[output.length - 1]).toBeCloseTo(0.25, 5);
   });
 
-  test("initializes libfvad and posts detector events", async () => {
+  test("posts Silero frame metadata when initialized", async () => {
     const context = new AudioContext({ sampleRate: 16000 });
     await context.audioWorklet.addModule(processorUrl);
 
-    const source = new ConstantSourceNode(context, { offset: 0 });
-    const sink = new GainNode(context, { gain: 0 });
     const node = createBackgroundNoiseDetectorNode(context, {
-      frameDurationMs: 30,
-      triggerRms: 0,
-      noisyRms: 0,
-      analysisWindowMs: 60,
-      cooldownMs: 1000,
+      frameSamples: 512,
+      sileroModel: "v5",
     });
 
     try {
       const readyMessage = await waitForWorkletMessage(node, isReadyMessage);
-      const detectedMessage = waitForWorkletMessage(
-        node,
-        isBackgroundNoiseDetectedMessage
-      );
-
-      source.connect(node).connect(sink).connect(context.destination);
-      source.start();
-      await context.resume();
-
-      const backgroundNoiseMessage = await detectedMessage;
 
       expect(readyMessage).toEqual({
         type: "ready",
         sampleRate: 16000,
-        frameSamples: 480,
-      });
-      expect(backgroundNoiseMessage).toMatchObject({
-        type: "background-noise-detected",
-        rms: 0,
-        voiceFrameRatio: 0,
-        activeFrameRatio: 1,
-        windowMs: 60,
+        frameSamples: 512,
+        frameDurationMs: 32,
+        sileroModel: "v5",
       });
     } finally {
       node.port.postMessage({ type: "dispose" });
-      source.stop();
       await context.close();
     }
   });

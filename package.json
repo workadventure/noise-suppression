@@ -63,6 +63,7 @@
   "homepage": "https://github.com/workAdventure/noise-suppression#readme",
   "license": "MIT",
   "dependencies": {
+    "@ricky0123/vad-web": "^0.0.30",
     "fft.js": "^4.0.4"
   },
   "devDependencies": {

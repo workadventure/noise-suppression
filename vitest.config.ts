@@ -43,6 +43,7 @@ export default defineConfig((env) => {
     defineConfig({
       test: {
         include: ["test/**/*.browser.test.ts"],
+        fileParallelism: false,
         browser: {
           enabled: true,
           headless: true,
