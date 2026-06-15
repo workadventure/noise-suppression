@@ -275,6 +275,8 @@ Useful local pages:
 - `/listen-test.html`: microphone, sample clip, or local file playback with a
   worklet/bypass switch
 - `/audio-worklet.html`: minimal AudioWorklet initialization demo
+- `/background-noise-worklet.html`: microphone or sample clip background-noise
+  detector tuning demo
 - `/audio-worklet-validation.html`: validation page for the worklet runtime
 - `/browser-benchmark-litert.html`: LiteRT benchmark page
 - `/browser-benchmark-compare.html`: single-threaded vs threaded comparison

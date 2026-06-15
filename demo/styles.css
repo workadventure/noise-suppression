@@ -165,9 +165,23 @@ label {
 }
 
 select,
-input[type="file"] {
+input[type="file"],
+input[type="number"] {
   width: 100%;
   min-height: 40px;
+}
+
+input[type="number"] {
+  border: 1px solid rgba(19, 34, 56, 0.18);
+  border-radius: 10px;
+  padding: 0 10px;
+  color: #132238;
+  background: white;
+  font: inherit;
+}
+
+.background-noise-controls {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
 }
 
 input[type="range"] {
