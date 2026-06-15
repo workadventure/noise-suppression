@@ -24,3 +24,4 @@ technical decisions in this repository.
 - [ADR 0006: Buffer AudioWorklet Input and Output Around 512-Sample DTLN Frames](./0006-buffer-audio-worklet-input-and-output-around-512-sample-dtln-frames.md)
 - [ADR 0007: Use LiteRT ESM Fork for AudioWorklet](./0007-use-litert-esm-fork-for-audioworklet.md)
 - [ADR 0008: Vendor libfvad for Background Noise Detection](./0008-vendor-libfvad-for-background-noise-detection.md)
+- [ADR 0009: Use Silero VAD Web for Background Noise Detection](./0009-use-silero-vad-web-for-background-noise-detection.md)
