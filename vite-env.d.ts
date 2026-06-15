@@ -15,6 +15,11 @@ declare module "virtual:noise-suppression-audio-worklet-module-url" {
   export default moduleUrl;
 }
 
+declare module "virtual:background-noise-detector-audio-worklet-module-url" {
+  const moduleUrl: string;
+  export default moduleUrl;
+}
+
 declare module "virtual:noise-suppression-default-assets" {
   export const defaultLiteRtWasmRoot: string;
   export const defaultModel1Url: string;

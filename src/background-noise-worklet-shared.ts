@@ -1,5 +1,7 @@
 import type { BackgroundNoiseDetectedMessage } from "./background-noise/detector";
 
+export type { BackgroundNoiseDetectedMessage } from "./background-noise/detector";
+
 export const BACKGROUND_NOISE_DETECTOR_AUDIO_WORKLET_PROCESSOR_NAME =
   "workadventure-background-noise-detector";
 
