@@ -17,6 +17,11 @@
       "import": "./dist/audio-worklet.js",
       "default": "./dist/audio-worklet.js"
     },
+    "./background-noise-worklet": {
+      "types": "./dist/background-noise-worklet.d.ts",
+      "import": "./dist/background-noise-worklet.js",
+      "default": "./dist/background-noise-worklet.js"
+    },
     "./vite": {
       "types": "./dist/vite.d.ts",
       "import": "./dist/vite.js",
