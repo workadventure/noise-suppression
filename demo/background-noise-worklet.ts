@@ -3,6 +3,7 @@ import helicopterClipUrl from "../clips/trump_vs_helicopter.wav?url";
 import airConditioningClipUrl from "../clips/airconditioning.wav?url";
 import dogBarkingClipUrl from "../clips/dog_barking_noisy.wav?url";
 import pureNoiseClipUrl from "../clips/pure-noise.wav?url";
+import whiteNoiseClipUrl from "../clips/white-noise-15s.wav?url";
 import {
   createBackgroundNoiseDetectorAudioWorklet,
   isBackgroundNoiseDetectedMessage,
@@ -13,7 +14,7 @@ import {
 import "./styles.css";
 
 type SourceMode = "microphone" | "clip";
-type VadMode = NonNullable<BackgroundNoiseDetectorAudioWorkletOptions["vadMode"]>;
+type SileroModel = NonNullable<BackgroundNoiseDetectorAudioWorkletOptions["sileroModel"]>;
 
 interface ActiveGraph {
   context: AudioContext;
@@ -25,6 +26,7 @@ interface ActiveGraph {
   stopMessages: () => void;
   animationFrameId: number;
   frameSamples: number;
+  frameDurationMs: number;
   microphoneStream: MediaStream | undefined;
   bufferSource: AudioBufferSourceNode | undefined;
 }
@@ -35,6 +37,7 @@ const clips = [
   { label: "Air conditioning", url: airConditioningClipUrl },
   { label: "Dog barking", url: dogBarkingClipUrl },
   { label: "Pure noise", url: pureNoiseClipUrl },
+  { label: "White noise", url: whiteNoiseClipUrl },
 ] as const;
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -78,13 +81,31 @@ app.innerHTML = `
       </label>
 
       <label class="stacked-control">
-        <span>VAD mode</span>
-        <select id="vad-mode-select">
-          <option value="normal">Normal</option>
-          <option value="low-bitrate">Low bitrate</option>
-          <option value="aggressive" selected>Aggressive</option>
-          <option value="very-aggressive">Very aggressive</option>
+        <span>Mic feedback</span>
+        <input id="microphone-feedback-input" type="checkbox">
+      </label>
+
+      <label class="stacked-control">
+        <span>Silero model</span>
+        <select id="silero-model-select">
+          <option value="v5" selected>V5</option>
+          <option value="legacy">Legacy</option>
         </select>
+      </label>
+
+      <label class="stacked-control">
+        <span>Speech threshold</span>
+        <input id="speech-threshold-input" type="number" min="0" max="1" step="0.01" value="0.3">
+      </label>
+
+      <label class="stacked-control">
+        <span>Max speech ratio</span>
+        <input id="max-speech-ratio-input" type="number" min="0" max="1" step="0.05" value="0.2">
+      </label>
+
+      <label class="stacked-control">
+        <span>Max avg speech</span>
+        <input id="max-average-speech-input" type="number" min="0" max="1" step="0.05" value="0.2">
       </label>
 
       <label class="stacked-control">
@@ -100,11 +121,6 @@ app.innerHTML = `
       <label class="stacked-control">
         <span>Window ms</span>
         <input id="analysis-window-input" type="number" min="30" step="100" value="1500">
-      </label>
-
-      <label class="stacked-control">
-        <span>Max voice ratio</span>
-        <input id="max-voice-ratio-input" type="number" min="0" max="1" step="0.05" value="0.2">
       </label>
 
       <label class="stacked-control">
@@ -146,11 +162,14 @@ const statusElement = mustQuery<HTMLParagraphElement>("#status");
 const sourceModeSelect = mustQuery<HTMLSelectElement>("#source-mode-select");
 const clipSelect = mustQuery<HTMLSelectElement>("#clip-select");
 const outputGainInput = mustQuery<HTMLInputElement>("#output-gain-input");
-const vadModeSelect = mustQuery<HTMLSelectElement>("#vad-mode-select");
+const microphoneFeedbackInput = mustQuery<HTMLInputElement>("#microphone-feedback-input");
+const sileroModelSelect = mustQuery<HTMLSelectElement>("#silero-model-select");
+const speechThresholdInput = mustQuery<HTMLInputElement>("#speech-threshold-input");
+const maxSpeechRatioInput = mustQuery<HTMLInputElement>("#max-speech-ratio-input");
+const maxAverageSpeechInput = mustQuery<HTMLInputElement>("#max-average-speech-input");
 const triggerRmsInput = mustQuery<HTMLInputElement>("#trigger-rms-input");
 const noisyRmsInput = mustQuery<HTMLInputElement>("#noisy-rms-input");
 const analysisWindowInput = mustQuery<HTMLInputElement>("#analysis-window-input");
-const maxVoiceRatioInput = mustQuery<HTMLInputElement>("#max-voice-ratio-input");
 const cooldownInput = mustQuery<HTMLInputElement>("#cooldown-input");
 const startButton = mustQuery<HTMLButtonElement>("#start-button");
 const stopButton = mustQuery<HTMLButtonElement>("#stop-button");
@@ -161,7 +180,7 @@ const messages = mustQuery<HTMLPreElement>("#messages");
 
 let activeGraph: ActiveGraph | null = null;
 let eventCount = 0;
-let lastVoiceFrameRatio: number | null = null;
+let lastSpeechFrameRatio: number | null = null;
 
 runtimeMetrics.innerHTML = [
   metric("Worklet", "idle"),
@@ -171,11 +190,12 @@ runtimeMetrics.innerHTML = [
 inputMetrics.innerHTML = [
   metric("Live RMS", "-"),
   metric("Live dBFS", "-"),
-  metric("Last voice ratio", "-"),
+  metric("Last speech ratio", "-"),
 ].join("");
 eventMetrics.innerHTML = [
   metric("Event count", "0"),
   metric("Last event RMS", "-"),
+  metric("Avg speech", "-"),
   metric("Active ratio", "-"),
 ].join("");
 
@@ -217,12 +237,23 @@ function finiteInputValue(input: HTMLInputElement, label: string): number {
 }
 
 function readWorkletOptions(): BackgroundNoiseDetectorAudioWorkletOptions {
+  const speechProbabilityThreshold = finiteInputValue(
+    speechThresholdInput,
+    "Speech threshold"
+  );
+
   return {
-    vadMode: vadModeSelect.value as VadMode,
+    sileroModel: sileroModelSelect.value as SileroModel,
+    positiveSpeechThreshold: speechProbabilityThreshold,
+    speechProbabilityThreshold,
     triggerRms: finiteInputValue(triggerRmsInput, "Trigger RMS"),
     noisyRms: finiteInputValue(noisyRmsInput, "Noisy RMS"),
     analysisWindowMs: finiteInputValue(analysisWindowInput, "Window ms"),
-    maxVoiceFrameRatio: finiteInputValue(maxVoiceRatioInput, "Max voice ratio"),
+    maxSpeechFrameRatio: finiteInputValue(maxSpeechRatioInput, "Max speech ratio"),
+    maxAverageSpeechProbability: finiteInputValue(
+      maxAverageSpeechInput,
+      "Max avg speech"
+    ),
     cooldownMs: finiteInputValue(cooldownInput, "Cooldown ms"),
   };
 }
@@ -233,7 +264,9 @@ function readSourceMode(): SourceMode {
 
 function readOutputGain(sourceMode: SourceMode): number {
   if (sourceMode === "microphone") {
-    return 0;
+    return microphoneFeedbackInput.checked
+      ? finiteInputValue(outputGainInput, "Output")
+      : 0;
   }
 
   return finiteInputValue(outputGainInput, "Output");
@@ -241,8 +274,11 @@ function readOutputGain(sourceMode: SourceMode): number {
 
 function updateSourceControls(): void {
   const sourceMode = readSourceMode();
+  const microphoneFeedbackEnabled =
+    sourceMode === "microphone" && microphoneFeedbackInput.checked;
   clipSelect.disabled = sourceMode !== "clip";
-  outputGainInput.disabled = sourceMode !== "clip";
+  microphoneFeedbackInput.disabled = sourceMode !== "microphone";
+  outputGainInput.disabled = sourceMode !== "clip" && !microphoneFeedbackEnabled;
 }
 
 async function createSource(
@@ -303,7 +339,7 @@ function updateInputMetrics(rms: number): void {
   inputMetrics.innerHTML = [
     metric("Live RMS", rms.toFixed(5)),
     metric("Live dBFS", `${rmsToDbfs(rms)} dB`),
-    metric("Last voice ratio", formatRatio(lastVoiceFrameRatio)),
+    metric("Last speech ratio", formatRatio(lastSpeechFrameRatio)),
   ].join("");
 }
 
@@ -340,6 +376,7 @@ function updateRuntimeMetrics(graph: ActiveGraph, frameSamples: number): void {
     metric("Context", graph.context.state),
     metric("Sample rate", `${graph.context.sampleRate} Hz`),
     metric("Frame samples", String(frameSamples)),
+    metric("Frame duration", `${graph.frameDurationMs.toFixed(1)} ms`),
     metric("Output gain", graph.outputGain.gain.value.toFixed(2)),
   ].join("");
 }
@@ -351,10 +388,11 @@ async function start(): Promise<void> {
   stopButton.disabled = false;
   messages.textContent = "No messages yet.";
   eventCount = 0;
-  lastVoiceFrameRatio = null;
+  lastSpeechFrameRatio = null;
   eventMetrics.innerHTML = [
     metric("Event count", "0"),
     metric("Last event RMS", "-"),
+    metric("Avg speech", "-"),
     metric("Active ratio", "-"),
   ].join("");
 
@@ -403,10 +441,11 @@ async function start(): Promise<void> {
         }
 
         eventCount += 1;
-        lastVoiceFrameRatio = message.voiceFrameRatio;
+        lastSpeechFrameRatio = message.speechFrameRatio;
         eventMetrics.innerHTML = [
           metric("Event count", String(eventCount)),
           metric("Last event RMS", message.rms.toFixed(5)),
+          metric("Avg speech", formatRatio(message.averageSpeechProbability)),
           metric("Active ratio", formatRatio(message.activeFrameRatio)),
         ].join("");
       }
@@ -426,6 +465,7 @@ async function start(): Promise<void> {
       stopMessages,
       animationFrameId: 0,
       frameSamples: readyMessage.frameSamples,
+      frameDurationMs: readyMessage.frameDurationMs,
       microphoneStream,
       bufferSource,
     };
@@ -528,11 +568,23 @@ clipSelect.addEventListener("change", () => {
 outputGainInput.addEventListener("input", () => {
   const graph = activeGraph;
 
-  if (!graph || graph.sourceMode !== "clip") {
+  if (!graph) {
     return;
   }
 
-  graph.outputGain.gain.value = readOutputGain("clip");
+  graph.outputGain.gain.value = readOutputGain(graph.sourceMode);
+  updateRuntimeMetrics(graph, graph.frameSamples);
+});
+
+microphoneFeedbackInput.addEventListener("change", () => {
+  updateSourceControls();
+  const graph = activeGraph;
+
+  if (!graph || graph.sourceMode !== "microphone") {
+    return;
+  }
+
+  graph.outputGain.gain.value = readOutputGain("microphone");
   updateRuntimeMetrics(graph, graph.frameSamples);
 });
 

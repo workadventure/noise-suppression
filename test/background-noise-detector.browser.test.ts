@@ -16,11 +16,11 @@ function processFrames(
   detector: BackgroundNoiseDetector,
   frameCount: number,
   amplitude: number,
-  isVoice: (index: number) => boolean = () => false
+  speechProbability: (index: number) => number = () => 0
 ) {
   return Array.from({ length: frameCount }, (_, index) =>
     detector.processFrame(createFrame(amplitude), {
-      isVoice: isVoice(index),
+      speechProbability: speechProbability(index),
       durationMs: FRAME_DURATION_MS,
     })
   );
@@ -41,7 +41,10 @@ describe("background noise detector", () => {
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       type: "background-noise-detected",
+      speechFrameRatio: 0,
       voiceFrameRatio: 0,
+      averageSpeechProbability: 0,
+      maxSpeechProbability: 0,
       activeFrameRatio: 1,
       windowMs: 1500,
       timestampMs: 1500,
@@ -56,8 +59,18 @@ describe("background noise detector", () => {
       detector,
       50,
       0.03,
-      (index) => index > 0 && index <= 11
+      (index) => (index > 0 && index <= 11 ? 0.9 : 0)
     );
+
+    expect(results.some((result) => result.event !== null)).toBe(false);
+  });
+
+  test("does not emit when average speech probability is too high", () => {
+    const detector = new BackgroundNoiseDetector({
+      maxSpeechFrameRatio: 1,
+      maxAverageSpeechProbability: 0.2,
+    });
+    const results = processFrames(detector, 50, 0.03, () => 0.25);
 
     expect(results.some((result) => result.event !== null)).toBe(false);
   });
@@ -84,8 +97,8 @@ describe("background noise detector", () => {
   });
 
   test("validates options and rejects empty RMS frames", () => {
-    expect(() => new BackgroundNoiseDetector({ maxVoiceFrameRatio: 1.1 })).toThrow(
-      /maxVoiceFrameRatio must be between 0 and 1/
+    expect(() => new BackgroundNoiseDetector({ maxSpeechFrameRatio: 1.1 })).toThrow(
+      /maxSpeechFrameRatio must be between 0 and 1/
     );
     expect(() => calculateRms(new Float32Array())).toThrow(/empty audio frame/);
   });

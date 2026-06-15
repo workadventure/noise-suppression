@@ -20,6 +20,9 @@ const backgroundNoiseDetectorAudioWorkletModuleUrlVirtualId =
 const resolvedBackgroundNoiseDetectorAudioWorkletModuleUrlVirtualId = `\0${backgroundNoiseDetectorAudioWorkletModuleUrlVirtualId}`;
 const defaultAssetsVirtualId = "virtual:noise-suppression-default-assets";
 const resolvedDefaultAssetsVirtualId = `\0${defaultAssetsVirtualId}`;
+const backgroundNoiseDetectorSileroAssetsVirtualId =
+  "virtual:background-noise-detector-silero-assets";
+const resolvedBackgroundNoiseDetectorSileroAssetsVirtualId = `\0${backgroundNoiseDetectorSileroAssetsVirtualId}`;
 
 const packagedLiteRtAssets = [
   "litert_wasm_compat_internal.js",
@@ -51,6 +54,27 @@ const packagedModelAssets = [
     fileName: "assets/model_quant_2.tflite",
   },
 ];
+
+const packagedSileroAssets = [
+  "vad.worklet.bundle.min.js",
+  "silero_vad_legacy.onnx",
+  "silero_vad_v5.onnx",
+].map((fileName) => ({
+  source: path.resolve(rootDir, "node_modules/@ricky0123/vad-web/dist", fileName),
+  fileName: `vendor/silero/${fileName}`,
+}));
+
+const packagedOnnxRuntimeAssets = fs
+  .readdirSync(path.resolve(rootDir, "node_modules/onnxruntime-web/dist"))
+  .filter(
+    (fileName) =>
+      fileName.startsWith("ort-wasm") &&
+      (fileName.endsWith(".wasm") || fileName.endsWith(".mjs"))
+  )
+  .map((fileName) => ({
+    source: path.resolve(rootDir, "node_modules/onnxruntime-web/dist", fileName),
+    fileName: `vendor/onnxruntime/${fileName}`,
+  }));
 
 function bytesPlugin() {
   const bytesQuery = "?bytes";
@@ -280,6 +304,63 @@ export const defaultModel2Url = import.meta.ROLLUP_FILE_URL_${modelAssetReferenc
   };
 }
 
+function backgroundNoiseDetectorSileroAssetsPlugin() {
+  let command = "build";
+
+  return {
+    name: "background-noise-detector-silero-assets",
+    configResolved(config) {
+      command = config.command;
+    },
+    resolveId(source) {
+      if (source === backgroundNoiseDetectorSileroAssetsVirtualId) {
+        return resolvedBackgroundNoiseDetectorSileroAssetsVirtualId;
+      }
+
+      return null;
+    },
+    load(id) {
+      if (id !== resolvedBackgroundNoiseDetectorSileroAssetsVirtualId) {
+        return null;
+      }
+
+      if (command === "serve") {
+        return `
+export const defaultBackgroundNoiseDetectorBaseAssetPath = "/node_modules/@ricky0123/vad-web/dist/";
+export const defaultBackgroundNoiseDetectorOnnxWasmBasePath = "/node_modules/onnxruntime-web/dist/";
+`;
+      }
+
+      const sileroAssetReferences = packagedSileroAssets.map((asset) =>
+        this.emitFile({
+          type: "asset",
+          fileName: asset.fileName,
+          source: fs.readFileSync(asset.source),
+        })
+      );
+      const onnxRuntimeAssetReferences = packagedOnnxRuntimeAssets.map((asset) =>
+        this.emitFile({
+          type: "asset",
+          fileName: asset.fileName,
+          source: fs.readFileSync(asset.source),
+        })
+      );
+
+      return `
+const sileroAssetUrls = [
+  ${sileroAssetReferences.map((referenceId) => `import.meta.ROLLUP_FILE_URL_${referenceId}`).join(",\n  ")}
+];
+const onnxRuntimeAssetUrls = [
+  ${onnxRuntimeAssetReferences.map((referenceId) => `import.meta.ROLLUP_FILE_URL_${referenceId}`).join(",\n  ")}
+];
+
+export const defaultBackgroundNoiseDetectorBaseAssetPath = new URL(".", sileroAssetUrls[0]).toString();
+export const defaultBackgroundNoiseDetectorOnnxWasmBasePath = new URL(".", onnxRuntimeAssetUrls[0]).toString();
+`;
+    },
+  };
+}
+
 async function buildAudioWorkletDevBundle() {
   const result = await build({
     root: rootDir,
@@ -376,11 +457,12 @@ async function buildBackgroundNoiseDetectorAudioWorkletDevBundle() {
 
 export default defineConfig(({ command }) => {
   return {
-    assetsInclude: ["**/*.tflite", "**/*.tflite?inline"],
+    assetsInclude: ["**/*.tflite", "**/*.tflite?inline", "**/*.onnx"],
     base: "./",
     plugins: [
       bytesPlugin(),
       defaultAssetsPlugin(),
+      backgroundNoiseDetectorSileroAssetsPlugin(),
       audioWorkletBundlePlugin(),
       ...(command === "serve"
         ? [
@@ -426,7 +508,7 @@ export default defineConfig(({ command }) => {
       target: "es2022",
       sourcemap: true,
       rollupOptions: {
-        external: ["fft.js", "node:fs", "node:url"],
+        external: ["@ricky0123/vad-web", "fft.js", "node:fs", "node:url"],
         output: {
           assetFileNames(assetInfo) {
             const originalFileName =
@@ -438,6 +520,14 @@ export default defineConfig(({ command }) => {
 
             if (originalFileName.includes("forks/litertjs-core/wasm/")) {
               return "vendor/litert/[name][extname]";
+            }
+
+            if (originalFileName.includes("@ricky0123/vad-web/dist/")) {
+              return "vendor/silero/[name][extname]";
+            }
+
+            if (originalFileName.includes("onnxruntime-web/dist/")) {
+              return "vendor/onnxruntime/[name][extname]";
             }
 
             return "assets/[name]-[hash][extname]";

@@ -5,28 +5,20 @@ export type { BackgroundNoiseDetectedMessage } from "./background-noise/detector
 export const BACKGROUND_NOISE_DETECTOR_AUDIO_WORKLET_PROCESSOR_NAME =
   "workadventure-background-noise-detector";
 
-export type BackgroundNoiseDetectorAudioWorkletVadMode =
-  | "normal"
-  | "low-bitrate"
-  | "aggressive"
-  | "very-aggressive";
-
-export type BackgroundNoiseDetectorAudioWorkletFrameDurationMs = 10 | 20 | 30;
+export type BackgroundNoiseDetectorSileroModel = "v5" | "legacy";
 
 export interface BackgroundNoiseDetectorAudioWorkletProcessorOptions {
-  vadMode?: BackgroundNoiseDetectorAudioWorkletVadMode;
-  frameDurationMs?: BackgroundNoiseDetectorAudioWorkletFrameDurationMs;
-  triggerRms?: number;
-  noisyRms?: number;
-  analysisWindowMs?: number;
-  maxVoiceFrameRatio?: number;
-  cooldownMs?: number;
+  frameSamples?: number;
+  frameDurationMs?: number;
+  sileroModel?: BackgroundNoiseDetectorSileroModel;
 }
 
 export interface BackgroundNoiseDetectorAudioWorkletReadyMessage {
   type: "ready";
   sampleRate: number;
   frameSamples: number;
+  frameDurationMs: number;
+  sileroModel: BackgroundNoiseDetectorSileroModel;
 }
 
 export interface BackgroundNoiseDetectorAudioWorkletErrorMessage {

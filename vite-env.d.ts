@@ -25,3 +25,8 @@ declare module "virtual:noise-suppression-default-assets" {
   export const defaultModel1Url: string;
   export const defaultModel2Url: string;
 }
+
+declare module "virtual:background-noise-detector-silero-assets" {
+  export const defaultBackgroundNoiseDetectorBaseAssetPath: string;
+  export const defaultBackgroundNoiseDetectorOnnxWasmBasePath: string;
+}

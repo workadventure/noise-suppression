@@ -2,7 +2,10 @@ export interface BackgroundNoiseDetectorOptions {
   triggerRms?: number;
   noisyRms?: number;
   analysisWindowMs?: number;
+  maxSpeechFrameRatio?: number;
   maxVoiceFrameRatio?: number;
+  speechProbabilityThreshold?: number;
+  maxAverageSpeechProbability?: number;
   cooldownMs?: number;
 }
 
@@ -10,18 +13,22 @@ export interface ResolvedBackgroundNoiseDetectorOptions {
   triggerRms: number;
   noisyRms: number;
   analysisWindowMs: number;
-  maxVoiceFrameRatio: number;
+  maxSpeechFrameRatio: number;
+  speechProbabilityThreshold: number;
+  maxAverageSpeechProbability: number;
   cooldownMs: number;
 }
 
 export interface BackgroundNoiseDetectorFrameInput {
-  isVoice: boolean;
+  speechProbability?: number;
+  isVoice?: boolean;
   durationMs: number;
   timestampMs?: number;
 }
 
 export interface BackgroundNoiseDetectorFrameResult {
-  isVoice: boolean;
+  isSpeech: boolean;
+  speechProbability: number;
   rms: number;
   rmsDb: number;
   durationMs: number;
@@ -31,7 +38,10 @@ export interface BackgroundNoiseDetectedMessage {
   type: "background-noise-detected";
   rms: number;
   rmsDb: number;
+  speechFrameRatio: number;
   voiceFrameRatio: number;
+  averageSpeechProbability: number;
+  maxSpeechProbability: number;
   activeFrameRatio: number;
   windowMs: number;
   timestampMs: number;
@@ -44,8 +54,10 @@ export interface BackgroundNoiseDetectorProcessResult {
 
 interface CandidateWindow {
   totalFrames: number;
-  voiceFrames: number;
+  speechFrames: number;
   activeFrames: number;
+  speechProbabilitySum: number;
+  maxSpeechProbability: number;
   rmsSum: number;
   durationMs: number;
 }
@@ -54,7 +66,9 @@ export const DEFAULT_BACKGROUND_NOISE_DETECTOR_OPTIONS: ResolvedBackgroundNoiseD
   triggerRms: 0.01,
   noisyRms: 0.02,
   analysisWindowMs: 1500,
-  maxVoiceFrameRatio: 0.2,
+  maxSpeechFrameRatio: 0.2,
+  speechProbabilityThreshold: 0.3,
+  maxAverageSpeechProbability: 0.2,
   cooldownMs: 15000,
 };
 
@@ -75,9 +89,11 @@ export class BackgroundNoiseDetector {
   ): BackgroundNoiseDetectorProcessResult {
     const durationMs = input.durationMs;
     const timestampMs = this.resolveTimestampMs(durationMs, input.timestampMs);
+    const speechProbability = resolveSpeechProbability(input, this.options);
     const rms = calculateRms(frame);
     const result: BackgroundNoiseDetectorFrameResult = {
-      isVoice: input.isVoice,
+      isSpeech: speechProbability >= this.options.speechProbabilityThreshold,
+      speechProbability,
       rms,
       rmsDb: rmsToDbfs(rms),
       durationMs,
@@ -89,7 +105,7 @@ export class BackgroundNoiseDetector {
     }
 
     if (this.candidateWindow === null) {
-      if (result.isVoice || result.rms < this.options.triggerRms) {
+      if (result.isSpeech || result.rms < this.options.triggerRms) {
         return { frame: result, event: null };
       }
 
@@ -140,9 +156,15 @@ export class BackgroundNoiseDetector {
     timestampMs: number
   ): BackgroundNoiseDetectedMessage | null {
     const rms = candidateWindow.rmsSum / candidateWindow.totalFrames;
-    const voiceFrameRatio = candidateWindow.voiceFrames / candidateWindow.totalFrames;
+    const speechFrameRatio = candidateWindow.speechFrames / candidateWindow.totalFrames;
+    const averageSpeechProbability =
+      candidateWindow.speechProbabilitySum / candidateWindow.totalFrames;
 
-    if (rms < this.options.noisyRms || voiceFrameRatio > this.options.maxVoiceFrameRatio) {
+    if (
+      rms < this.options.noisyRms ||
+      speechFrameRatio > this.options.maxSpeechFrameRatio ||
+      averageSpeechProbability > this.options.maxAverageSpeechProbability
+    ) {
       return null;
     }
 
@@ -150,7 +172,10 @@ export class BackgroundNoiseDetector {
       type: "background-noise-detected",
       rms,
       rmsDb: rmsToDbfs(rms),
-      voiceFrameRatio,
+      speechFrameRatio,
+      voiceFrameRatio: speechFrameRatio,
+      averageSpeechProbability,
+      maxSpeechProbability: candidateWindow.maxSpeechProbability,
       activeFrameRatio: candidateWindow.activeFrames / candidateWindow.totalFrames,
       windowMs: candidateWindow.durationMs,
       timestampMs,
@@ -161,15 +186,22 @@ export class BackgroundNoiseDetector {
 export function resolveBackgroundNoiseDetectorOptions(
   options: BackgroundNoiseDetectorOptions = {}
 ): ResolvedBackgroundNoiseDetectorOptions {
+  const maxSpeechFrameRatio =
+    options.maxSpeechFrameRatio ??
+    options.maxVoiceFrameRatio ??
+    DEFAULT_BACKGROUND_NOISE_DETECTOR_OPTIONS.maxSpeechFrameRatio;
   const resolved = {
     ...DEFAULT_BACKGROUND_NOISE_DETECTOR_OPTIONS,
     ...options,
+    maxSpeechFrameRatio,
   };
 
   validateNonNegativeFiniteNumber(resolved.triggerRms, "triggerRms");
   validateNonNegativeFiniteNumber(resolved.noisyRms, "noisyRms");
   validatePositiveFiniteNumber(resolved.analysisWindowMs, "analysisWindowMs");
-  validateRatio(resolved.maxVoiceFrameRatio, "maxVoiceFrameRatio");
+  validateRatio(resolved.maxSpeechFrameRatio, "maxSpeechFrameRatio");
+  validateRatio(resolved.speechProbabilityThreshold, "speechProbabilityThreshold");
+  validateRatio(resolved.maxAverageSpeechProbability, "maxAverageSpeechProbability");
   validateNonNegativeFiniteNumber(resolved.cooldownMs, "cooldownMs");
 
   return resolved;
@@ -198,8 +230,10 @@ export function rmsToDbfs(rms: number): number {
 function createCandidateWindow(): CandidateWindow {
   return {
     totalFrames: 0,
-    voiceFrames: 0,
+    speechFrames: 0,
     activeFrames: 0,
+    speechProbabilitySum: 0,
+    maxSpeechProbability: 0,
     rmsSum: 0,
     durationMs: 0,
   };
@@ -211,10 +245,26 @@ function collectCandidateFrame(
   triggerRms: number
 ): void {
   candidateWindow.totalFrames++;
-  candidateWindow.voiceFrames += result.isVoice ? 1 : 0;
+  candidateWindow.speechFrames += result.isSpeech ? 1 : 0;
   candidateWindow.activeFrames += result.rms >= triggerRms ? 1 : 0;
+  candidateWindow.speechProbabilitySum += result.speechProbability;
+  candidateWindow.maxSpeechProbability = Math.max(
+    candidateWindow.maxSpeechProbability,
+    result.speechProbability
+  );
   candidateWindow.rmsSum += result.rms;
   candidateWindow.durationMs += result.durationMs;
+}
+
+function resolveSpeechProbability(
+  input: BackgroundNoiseDetectorFrameInput,
+  options: ResolvedBackgroundNoiseDetectorOptions
+): number {
+  if (input.speechProbability !== undefined) {
+    return input.speechProbability;
+  }
+
+  return input.isVoice === true ? options.speechProbabilityThreshold : 0;
 }
 
 function validateRatio(value: number, name: string): number {
