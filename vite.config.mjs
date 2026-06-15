@@ -413,6 +413,10 @@ export default defineConfig(({ command }) => {
         entry: {
           index: path.resolve(rootDir, "src/index.ts"),
           "audio-worklet": path.resolve(rootDir, "src/audio-worklet.ts"),
+          "background-noise-worklet": path.resolve(
+            rootDir,
+            "src/background-noise-worklet.ts"
+          ),
           vite: path.resolve(rootDir, "src/vite.ts"),
         },
         name: "NoiseSuppression",
