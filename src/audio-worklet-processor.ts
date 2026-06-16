@@ -8,8 +8,8 @@ import {
   type NoiseSuppressionAudioWorkletProcessingStartedMessage,
   type NoiseSuppressionAudioWorkletReadyMessage,
 } from "./audio-worklet-shared";
-import createLiteRtWasm from "../forks/litertjs-core/wasm/litert_wasm_internal.mjs";
-import liteRtWasmBinary from "../forks/litertjs-core/wasm/litert_wasm_internal.wasm?bytes";
+import createLiteRtWasmRelaxed from "../forks/litertjs-core/wasm/litert_wasm_internal.mjs";
+import createLiteRtWasmCompat from "../forks/litertjs-core/wasm/litert_wasm_compat_internal.mjs";
 import model1Data from "../model/model_quant_1.tflite?bytes";
 import model2Data from "../model/model_quant_2.tflite?bytes";
 
@@ -202,10 +202,13 @@ class NoiseSuppressionProcessor extends AudioWorkletProcessor {
     options: NoiseSuppressionAudioWorkletProcessorOptions
   ): Promise<void> {
     try {
+      const createLiteRtWasm =
+        options.liteRtVariant === "compat" ? createLiteRtWasmCompat : createLiteRtWasmRelaxed;
+
       const module = await createNoiseSuppressionRuntime({
         liteRtWasmRoot: "bundled://litert",
         liteRtWasmModuleFactory: createLiteRtWasm,
-        liteRtWasmBinary,
+        liteRtWasmBinary: new Uint8Array(options.liteRtWasmBinary),
         model1Data,
         model2Data,
         threads: options.threads,

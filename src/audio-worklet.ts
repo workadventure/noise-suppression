@@ -1,8 +1,12 @@
 import audioWorkletProcessorModuleUrl from "virtual:noise-suppression-audio-worklet-module-url";
 import { NOISE_SUPPRESSION_AUDIO_WORKLET_DEV_MODULE_URL } from "./audio-worklet-dev-module-url";
-import { resolveBrowserCpuThreadCount } from "./browser-runtime-options";
+import {
+  resolveBrowserCpuThreadCount,
+  resolveLiteRtWasmUrl,
+} from "./browser-runtime-options";
 import {
   NOISE_SUPPRESSION_AUDIO_WORKLET_PROCESSOR_NAME,
+  type LiteRtWasmVariant,
   type NoiseSuppressionAudioWorkletBenchmarkCompleteMessage,
   type NoiseSuppressionAudioWorkletBenchmarkOptions,
   type NoiseSuppressionAudioWorkletErrorMessage,
@@ -35,6 +39,48 @@ export interface NoiseSuppressionAudioWorkletHandle {
 
 const DEFAULT_READY_TIMEOUT_MS = 30000;
 const moduleLoadCache = new WeakMap<AudioWorkletCapableContext, Map<string, Promise<void>>>();
+
+const WASM_RELAXED_SIMD_PROBE = new Uint8Array([
+  0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 15, 1, 13,
+  0, 65, 1, 253, 15, 65, 2, 253, 15, 253, 128, 2, 11,
+]);
+
+function resolveLiteRtWasmVariant(): LiteRtWasmVariant {
+  try {
+    return WebAssembly.validate(WASM_RELAXED_SIMD_PROBE) ? "relaxed" : "compat";
+  } catch {
+    return "compat";
+  }
+}
+
+const wasmBinaryCache = new Map<LiteRtWasmVariant, Promise<ArrayBuffer>>();
+
+async function fetchLiteRtWasmBinary(variant: LiteRtWasmVariant): Promise<ArrayBuffer> {
+  const url = resolveLiteRtWasmUrl(variant);
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    throw new Error(
+      `Failed to load LiteRT Wasm (${variant}) from ${url}: ${response.status} ${response.statusText}`
+    );
+  }
+
+  return response.arrayBuffer();
+}
+
+function loadLiteRtWasmBinary(variant: LiteRtWasmVariant): Promise<ArrayBuffer> {
+  let cached = wasmBinaryCache.get(variant);
+
+  if (!cached) {
+    cached = fetchLiteRtWasmBinary(variant).catch((error) => {
+      wasmBinaryCache.delete(variant);
+      throw error;
+    });
+    wasmBinaryCache.set(variant, cached);
+  }
+
+  return cached;
+}
 
 function getModuleLoadPromise(
   context: AudioWorkletCapableContext,
@@ -126,12 +172,19 @@ export async function createNoiseSuppressionAudioWorklet(
   const numThreads = resolveBrowserCpuThreadCount(options.numThreads);
   const bypassUntilReady = options.bypassUntilReady ?? true;
 
-  await getModuleLoadPromise(context, moduleUrl);
+  const liteRtVariant = resolveLiteRtWasmVariant();
+
+  const [, liteRtWasmBinary] = await Promise.all([
+    getModuleLoadPromise(context, moduleUrl),
+    loadLiteRtWasmBinary(liteRtVariant),
+  ]);
 
   const processorOptions: NoiseSuppressionAudioWorkletProcessorOptions = {
     threads,
     numThreads,
     bypassUntilReady,
+    liteRtVariant,
+    liteRtWasmBinary,
   };
 
   const node = new AudioWorkletNode(

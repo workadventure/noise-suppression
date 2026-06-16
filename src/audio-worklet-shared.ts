@@ -3,10 +3,14 @@ import type { NoiseSuppressionModelDetails } from "./runtime";
 export const NOISE_SUPPRESSION_AUDIO_WORKLET_PROCESSOR_NAME =
   "workadventure-noise-suppression";
 
+export type LiteRtWasmVariant = "relaxed" | "compat";
+
 export interface NoiseSuppressionAudioWorkletProcessorOptions {
   threads: boolean;
   numThreads: number;
   bypassUntilReady: boolean;
+  liteRtVariant: LiteRtWasmVariant;
+  liteRtWasmBinary: ArrayBuffer;
 }
 
 export interface NoiseSuppressionAudioWorkletReadyMessage {
