@@ -29,14 +29,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install Playwright Chromium
-        run: npx playwright install --with-deps chromium
-
       - name: Typecheck
         run: npm run typecheck
-
-      - name: Run browser tests
-        run: npm run test:browser
 
       - name: Build package
         run: npm run build
@@ -47,9 +41,53 @@ jobs:
           name: dist
           path: dist/
 
+  browser-tests:
+    name: Browser Tests (${{ matrix.browser }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        browser:
+          - chromium
+          - firefox
+          - webkit
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright ${{ matrix.browser }}
+        run: npx playwright install --with-deps ${{ matrix.browser }}
+
+      - name: Configure virtual audio output for Firefox
+        if: matrix.browser == 'firefox'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes pulseaudio pulseaudio-utils
+          pulseaudio --start --exit-idle-time=-1
+          pactl load-module module-null-sink sink_name=ci_null_sink
+          pactl set-default-sink ci_null_sink
+          pactl info
+
+      - name: Run browser tests
+        run: npm run test:browser
+        env:
+          VITEST_BROWSER: ${{ matrix.browser }}
+
   publish:
     name: Publish Package
-    needs: build
+    needs:
+      - build
+      - browser-tests
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -71,11 +109,11 @@ jobs:
           tag_version="${GITHUB_REF_NAME#v}"
           npm version "$tag_version" --no-git-tag-version --allow-same-version
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build package
-        run: npm run build
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
 
       - name: Pack npm tarball
         run: npm pack
