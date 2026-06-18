@@ -1,7 +1,11 @@
 # ADR 0008: Vendor libfvad for Background Noise Detection
 
-- Status: Accepted
+- Status: Superseded by [ADR 0009](./0009-use-silero-vad-web-for-background-noise-detection.md)
 - Date: 2026-06-12
+
+This decision was implemented and evaluated, but libfvad classified the tested
+loud noise-only fixtures as speech. ADR 0009 replaces it with Silero VAD, and
+the vendored libfvad implementation has been removed.
 
 ## Context
 

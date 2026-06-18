@@ -232,6 +232,8 @@ Acceptance checks:
 
 ## Step 10: Remove or Quarantine libfvad
 
+Status: Completed.
+
 After Silero passes the fixture tests:
 
 1. Remove libfvad from the background-noise hot path.
@@ -245,6 +247,13 @@ Acceptance checks:
 - no libfvad import remains in background-noise runtime code
 - package build no longer emits libfvad Wasm unless explicitly retained
 - docs point readers to ADR 0009 for the active backend decision
+
+Implementation result:
+
+- libfvad is absent from the runtime and package build
+- the wrapper and its browser tests were deleted
+- the complete `vendor/libfvad` tree was deleted
+- ADR 0008 is marked as superseded by ADR 0009
 
 ## Risks
 
