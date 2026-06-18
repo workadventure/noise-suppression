@@ -145,7 +145,8 @@ correctness or performance assertions.
 
 That script runs Vitest in browser mode. Playwright-managed browser binaries
 are used by default; `PLAYWRIGHT_CHROMIUM_EXECUTABLE` can select a custom
-Chromium binary when needed.
+Chromium binary when needed. `VITEST_BROWSER` can select one of `chromium`,
+`firefox`, or `webkit`; without it, all three run locally.
 
 ### TypeScript coverage
 
@@ -157,12 +158,12 @@ browser tests are checked by the existing strict TypeScript pass.
 The CI workflow in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)
 now:
 
-- installs dependencies
-- installs Playwright Chromium, Firefox, and WebKit with
-  `npx playwright install --with-deps chromium firefox webkit`
-- runs `npm run typecheck`
-- runs `npm run test:browser`
-- runs `npm run build`
+- runs typechecking and the package build in one job
+- runs browser tests in a three-entry Chromium, Firefox, and WebKit matrix
+- installs only the Playwright engine needed by each matrix entry
+- uploads `dist/` from the build job
+- gates publishing on both build and browser-test jobs
+- downloads the build artifact in the publish job instead of rebuilding it
 
 ## Results
 
