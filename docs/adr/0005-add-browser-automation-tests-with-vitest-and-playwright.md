@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-03-13
+- Last updated: 2026-06-18
 
 ## Context
 
@@ -74,11 +75,9 @@ That keeps test setup aligned with the actual library runtime.
 The tests need a real browser engine plus reliable CI automation. The Playwright
 provider gives that while staying integrated with Vitest Browser Mode.
 
-It also lets the test setup pass launch flags such as:
-
-- `--autoplay-policy=no-user-gesture-required`
-
-That avoids flaky `AudioContext` startup behavior during automation.
+It also lets the tests generate trusted user gestures. The AudioWorklet test
+uses one to resume its `AudioContext`, matching browser autoplay policies
+without a Chromium-specific launch flag.
 
 ### 4. CI needs to validate browser functionality, not just TypeScript and bundling
 
@@ -105,8 +104,11 @@ Key points:
 - it reuses the repository’s Vite config via `mergeConfig(...)`
 - it enables Vitest Browser Mode
 - it uses the Playwright provider
-- it runs Chromium headlessly
-- it passes an autoplay override for audio tests
+- it runs Chromium, Firefox, and WebKit headlessly
+- it keeps the optional custom Chromium executable scoped to Chromium
+- it runs the same AudioWorklet test in WebKit even though the statically
+  bundled LiteRT Wasm build currently fails there because Playwright WebKit
+  does not support relaxed SIMD
 
 ### Test cases
 
@@ -141,12 +143,9 @@ correctness or performance assertions.
 
 - `test:browser`
 
-That script runs Vitest in browser mode and sets:
-
-- `PLAYWRIGHT_BROWSERS_PATH=/tmp/pw-browsers`
-
-This keeps the browser install path explicit and avoids depending on a system
-browser.
+That script runs Vitest in browser mode. Playwright-managed browser binaries
+are used by default; `PLAYWRIGHT_CHROMIUM_EXECUTABLE` can select a custom
+Chromium binary when needed.
 
 ### TypeScript coverage
 
@@ -159,22 +158,26 @@ The CI workflow in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)
 now:
 
 - installs dependencies
-- installs Playwright Chromium with `npx playwright install --with-deps chromium`
+- installs Playwright Chromium, Firefox, and WebKit with
+  `npx playwright install --with-deps chromium firefox webkit`
 - runs `npm run typecheck`
 - runs `npm run test:browser`
 - runs `npm run build`
 
 ## Results
 
-The initial browser suite passes locally in Chromium:
+The browser suite passes locally with:
 
-- `2` test files
-- `2` tests
-- browser runtime smoke test: pass
-- AudioWorklet smoke test: pass
+- Chromium: browser runtime and AudioWorklet smoke tests
+- Firefox: browser runtime and AudioWorklet smoke tests
+- WebKit: browser runtime smoke test
+- WebKit: AudioWorklet smoke test fails while compiling the relaxed-SIMD Wasm
+  bundle
 
-This provides automated coverage for the two most important browser integration
-paths in the package.
+The WebKit failure is kept in the suite because it represents a real product
+compatibility gap. Fixing it requires producing both standard and compatibility
+worklet bundles, detecting relaxed SIMD support on the main thread, and loading
+the matching bundle before constructing the worklet node.
 
 ## Consequences
 
@@ -189,8 +192,10 @@ paths in the package.
 ### Negative
 
 - CI is slower because it must install a browser and run real browser tests.
-- The test environment depends on Playwright and a browser binary, which adds
-  maintenance overhead compared with pure Node tests.
+- The test environment depends on Playwright and three browser binaries, which
+  adds maintenance overhead compared with pure Node tests.
+- CI remains failing on WebKit until the AudioWorklet can load a compatible Wasm
+  bundle.
 - These tests are smoke tests; they do not yet cover detailed output
   equivalence or timing regressions.
 
@@ -199,10 +204,9 @@ paths in the package.
 During local setup, Playwright could not launch the Snap-packaged Chromium
 binary in this sandboxed environment.
 
-To avoid that dependency, the repository now prefers a Playwright-managed
-browser installation via:
-
-- `PLAYWRIGHT_BROWSERS_PATH=/tmp/pw-browsers`
+To avoid that dependency, the repository prefers Playwright-managed browser
+installations. A custom Chromium executable remains supported through
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE`.
 
 This is primarily an execution detail, not a product decision, but it is
 important for reproducible local runs in constrained environments.

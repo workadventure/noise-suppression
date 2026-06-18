@@ -4,15 +4,12 @@ import viteConfig from "./vite.config.mjs";
 
 const chromiumExecutablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE;
 
-const launchOptions =
+const chromiumLaunchOptions =
   chromiumExecutablePath && chromiumExecutablePath.length > 0
     ? {
         executablePath: chromiumExecutablePath,
-        args: ["--autoplay-policy=no-user-gesture-required"],
       }
-    : {
-        args: ["--autoplay-policy=no-user-gesture-required"],
-      };
+    : undefined;
 
 export default defineConfig((env) => {
   const resolvedViteConfig =
@@ -31,10 +28,17 @@ export default defineConfig((env) => {
         browser: {
           enabled: true,
           headless: true,
-          provider: playwright({
-            launchOptions,
-          }),
-          instances: [{ browser: "chromium" }],
+          provider: playwright(),
+          instances: [
+            {
+              browser: "chromium",
+              provider: playwright({
+                launchOptions: chromiumLaunchOptions,
+              }),
+            },
+            { browser: "firefox" },
+            { browser: "webkit" },
+          ],
         },
       },
     })
