@@ -7,17 +7,10 @@ import { viteStaticCopy } from "vite-plugin-static-copy";
 const rootDir = fileURLToPath(new URL(".", import.meta.url));
 const litertWasmUtilsAlias = path.resolve(rootDir, "forks/litertjs-wasm-utils/index.js");
 const devAudioWorkletModulePath = "/__noise_suppression_audio_worklet_processor.js";
-const devBackgroundNoiseDetectorAudioWorkletModulePath =
-  "/__background_noise_detector_audio_worklet_processor.js";
 const audioWorkletProcessorFileName = "assets/audio-worklet-processor.js";
-const backgroundNoiseDetectorAudioWorkletProcessorFileName =
-  "assets/background-noise-worklet-processor.js";
 const audioWorkletModuleUrlVirtualId =
   "virtual:noise-suppression-audio-worklet-module-url";
 const resolvedAudioWorkletModuleUrlVirtualId = `\0${audioWorkletModuleUrlVirtualId}`;
-const backgroundNoiseDetectorAudioWorkletModuleUrlVirtualId =
-  "virtual:background-noise-detector-audio-worklet-module-url";
-const resolvedBackgroundNoiseDetectorAudioWorkletModuleUrlVirtualId = `\0${backgroundNoiseDetectorAudioWorkletModuleUrlVirtualId}`;
 const defaultAssetsVirtualId = "virtual:noise-suppression-default-assets";
 const resolvedDefaultAssetsVirtualId = `\0${defaultAssetsVirtualId}`;
 const backgroundNoiseDetectorSileroAssetsVirtualId =
@@ -151,10 +144,8 @@ export default decodeBase64(base64);
 
 function audioWorkletBundlePlugin() {
   let bundledCodePromise;
-  let backgroundNoiseDetectorBundledCodePromise;
   let command = "build";
   let audioWorkletAssetReferenceId;
-  let backgroundNoiseDetectorAudioWorkletAssetReferenceId;
 
   return {
     name: "noise-suppression-audio-worklet-bundle",
@@ -164,10 +155,6 @@ function audioWorkletBundlePlugin() {
     resolveId(source) {
       if (source === audioWorkletModuleUrlVirtualId) {
         return resolvedAudioWorkletModuleUrlVirtualId;
-      }
-
-      if (source === backgroundNoiseDetectorAudioWorkletModuleUrlVirtualId) {
-        return resolvedBackgroundNoiseDetectorAudioWorkletModuleUrlVirtualId;
       }
 
       return null;
@@ -188,24 +175,6 @@ function audioWorkletBundlePlugin() {
         return `export default import.meta.ROLLUP_FILE_URL_${audioWorkletAssetReferenceId};`;
       }
 
-      if (id === resolvedBackgroundNoiseDetectorAudioWorkletModuleUrlVirtualId) {
-        if (command === "serve") {
-          return `export default ${JSON.stringify(
-            devBackgroundNoiseDetectorAudioWorkletModulePath
-          )};`;
-        }
-
-        backgroundNoiseDetectorBundledCodePromise ??=
-          buildBackgroundNoiseDetectorAudioWorkletDevBundle();
-        backgroundNoiseDetectorAudioWorkletAssetReferenceId ??= this.emitFile({
-          type: "asset",
-          fileName: backgroundNoiseDetectorAudioWorkletProcessorFileName,
-          source: await backgroundNoiseDetectorBundledCodePromise,
-        });
-
-        return `export default import.meta.ROLLUP_FILE_URL_${backgroundNoiseDetectorAudioWorkletAssetReferenceId};`;
-      }
-
       return null;
     },
     configureServer(server) {
@@ -222,24 +191,6 @@ function audioWorkletBundlePlugin() {
           next(error);
         }
       });
-
-      server.middlewares.use(
-        devBackgroundNoiseDetectorAudioWorkletModulePath,
-        async (_request, response, next) => {
-          try {
-            backgroundNoiseDetectorBundledCodePromise ??=
-              buildBackgroundNoiseDetectorAudioWorkletDevBundle();
-            const bundledCode = await backgroundNoiseDetectorBundledCodePromise;
-
-            response.statusCode = 200;
-            response.setHeader("Content-Type", "text/javascript");
-            response.end(bundledCode);
-          } catch (error) {
-            backgroundNoiseDetectorBundledCodePromise = undefined;
-            next(error);
-          }
-        }
-      );
     },
   };
 }
@@ -417,44 +368,6 @@ async function buildAudioWorkletDevBundle() {
   return chunk.code;
 }
 
-async function buildBackgroundNoiseDetectorAudioWorkletDevBundle() {
-  const result = await build({
-    root: rootDir,
-    configFile: false,
-    publicDir: false,
-    logLevel: "silent",
-    plugins: [bytesPlugin()],
-    worker: {
-      plugins: () => [bytesPlugin()],
-    },
-    build: {
-      target: "es2022",
-      write: false,
-      minify: false,
-      sourcemap: false,
-      emptyOutDir: false,
-      rollupOptions: {
-        input: path.resolve(rootDir, "src/background-noise-worklet-processor.ts"),
-        output: {
-          format: "iife",
-          inlineDynamicImports: true,
-        },
-      },
-    },
-  });
-
-  const output = Array.isArray(result) ? result[0]?.output : result.output;
-  const chunk = output?.find((item) => item.type === "chunk");
-
-  if (!chunk || chunk.type !== "chunk") {
-    throw new Error(
-      "Failed to build the background noise detector AudioWorklet development bundle."
-    );
-  }
-
-  return chunk.code;
-}
-
 export default defineConfig(({ command }) => {
   return {
     assetsInclude: ["**/*.tflite", "**/*.tflite?inline", "**/*.onnx"],
@@ -495,9 +408,9 @@ export default defineConfig(({ command }) => {
         entry: {
           index: path.resolve(rootDir, "src/index.ts"),
           "audio-worklet": path.resolve(rootDir, "src/audio-worklet.ts"),
-          "background-noise-worklet": path.resolve(
+          "background-noise": path.resolve(
             rootDir,
-            "src/background-noise-worklet.ts"
+            "src/background-noise.ts"
           ),
           vite: path.resolve(rootDir, "src/vite.ts"),
         },

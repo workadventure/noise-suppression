@@ -1,17 +1,18 @@
 import { describe, expect, test } from "vitest";
 import {
-  createBackgroundNoiseDetectorAudioWorklet,
+  createBackgroundNoiseDetector,
   isBackgroundNoiseDetectedMessage,
-  observeBackgroundNoiseDetectorAudioWorkletMessages,
-} from "../src/background-noise-worklet";
+  observeBackgroundNoiseDetectorMessages,
+} from "../src/background-noise";
 import pureNoiseClipUrl from "../clips/pure-noise.wav?url";
 import type {
   BackgroundNoiseDetectedMessage,
-  BackgroundNoiseDetectorAudioWorkletOutboundMessage,
-} from "../src/background-noise-worklet";
+  BackgroundNoiseDetectorHandle,
+  BackgroundNoiseDetectorOutboundMessage,
+} from "../src/background-noise";
 
 function waitForBackgroundNoiseDetected(
-  worklet: Awaited<ReturnType<typeof createBackgroundNoiseDetectorAudioWorklet>>,
+  detector: BackgroundNoiseDetectorHandle,
   timeoutMs = 15000
 ): Promise<BackgroundNoiseDetectedMessage> {
   return new Promise<BackgroundNoiseDetectedMessage>((resolve, reject) => {
@@ -20,9 +21,9 @@ function waitForBackgroundNoiseDetected(
       reject(new Error("Timed out waiting for background noise detector event."));
     }, timeoutMs);
 
-    const stopObserving = observeBackgroundNoiseDetectorAudioWorkletMessages(
-      worklet,
-      (message: BackgroundNoiseDetectorAudioWorkletOutboundMessage) => {
+    const stopObserving = observeBackgroundNoiseDetectorMessages(
+      detector,
+      (message: BackgroundNoiseDetectorOutboundMessage) => {
         if (!isBackgroundNoiseDetectedMessage(message)) {
           return;
         }
@@ -35,26 +36,25 @@ function waitForBackgroundNoiseDetected(
   });
 }
 
-describe("background noise AudioWorklet public API", () => {
+describe("background noise stream detector public API", () => {
   test("creates a detector handle and observes background noise events", async () => {
     const context = new AudioContext({ sampleRate: 16000 });
     const source = new ConstantSourceNode(context, { offset: 0 });
-    const sink = new GainNode(context, { gain: 0 });
+    const vadInput = context.createMediaStreamDestination();
 
+    source.connect(vadInput);
     source.start();
 
     try {
-      const worklet = await createBackgroundNoiseDetectorAudioWorklet(context, {
+      const detector = await createBackgroundNoiseDetector(context, vadInput.stream, {
         triggerRms: 0,
         noisyRms: 0,
         analysisWindowMs: 60,
         cooldownMs: 1000,
       });
 
-      const ready = await worklet.ready;
-      const detected = waitForBackgroundNoiseDetected(worklet);
-
-      source.connect(worklet.node).connect(sink).connect(context.destination);
+      const ready = await detector.ready;
+      const detected = waitForBackgroundNoiseDetected(detector);
       await context.resume();
 
       const event = await detected;
@@ -75,9 +75,10 @@ describe("background noise AudioWorklet public API", () => {
         windowMs: 64,
       });
 
-      worklet.dispose();
+      detector.dispose();
     } finally {
       source.stop();
+      vadInput.disconnect();
       await context.close();
     }
   }, 20000);
@@ -87,14 +88,15 @@ describe("background noise AudioWorklet public API", () => {
     const response = await fetch(pureNoiseClipUrl);
     const audioBuffer = await context.decodeAudioData(await response.arrayBuffer());
     const source = new AudioBufferSourceNode(context, { buffer: audioBuffer });
-    const sink = new GainNode(context, { gain: 0 });
+    const vadInput = context.createMediaStreamDestination();
     let sourceStarted = false;
 
-    try {
-      const worklet = await createBackgroundNoiseDetectorAudioWorklet(context);
-      const detected = waitForBackgroundNoiseDetected(worklet, 20000);
+    source.connect(vadInput);
 
-      source.connect(worklet.node).connect(sink).connect(context.destination);
+    try {
+      const detector = await createBackgroundNoiseDetector(context, vadInput.stream);
+      const detected = waitForBackgroundNoiseDetected(detector, 20000);
+
       source.start();
       sourceStarted = true;
       await context.resume();
@@ -105,11 +107,12 @@ describe("background noise AudioWorklet public API", () => {
       expect(event.speechFrameRatio).toBeLessThanOrEqual(0.2);
       expect(event.averageSpeechProbability).toBeLessThanOrEqual(0.2);
 
-      worklet.dispose();
+      detector.dispose();
     } finally {
       if (sourceStarted) {
         source.stop();
       }
+      vadInput.disconnect();
       await context.close();
     }
   }, 30000);

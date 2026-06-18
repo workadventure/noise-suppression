@@ -5,24 +5,25 @@ import dogBarkingClipUrl from "../clips/dog_barking_noisy.wav?url";
 import pureNoiseClipUrl from "../clips/pure-noise.wav?url";
 import whiteNoiseClipUrl from "../clips/white-noise-15s.wav?url";
 import {
-  createBackgroundNoiseDetectorAudioWorklet,
+  createBackgroundNoiseDetector,
   isBackgroundNoiseDetectedMessage,
-  observeBackgroundNoiseDetectorAudioWorkletMessages,
-  type BackgroundNoiseDetectorAudioWorkletHandle,
-  type BackgroundNoiseDetectorAudioWorkletOptions,
-} from "../src/background-noise-worklet";
+  observeBackgroundNoiseDetectorMessages,
+  type BackgroundNoiseDetectorHandle,
+  type BackgroundNoiseDetectorRuntimeOptions,
+} from "../src/background-noise";
 import "./styles.css";
 
 type SourceMode = "microphone" | "clip";
-type SileroModel = NonNullable<BackgroundNoiseDetectorAudioWorkletOptions["sileroModel"]>;
+type SileroModel = NonNullable<BackgroundNoiseDetectorRuntimeOptions["sileroModel"]>;
 
 interface ActiveGraph {
   context: AudioContext;
   sourceMode: SourceMode;
   sourceNode: AudioNode;
   analyserNode: AnalyserNode;
+  vadInput: MediaStreamAudioDestinationNode | undefined;
   outputGain: GainNode;
-  worklet: BackgroundNoiseDetectorAudioWorkletHandle;
+  detector: BackgroundNoiseDetectorHandle;
   stopMessages: () => void;
   animationFrameId: number;
   frameSamples: number;
@@ -51,9 +52,9 @@ app.innerHTML = `
     <p class="eyebrow">Background Noise Detector</p>
     <h1>Detect loud non-speech input</h1>
     <p class="lead">
-      This demo runs the standalone detector AudioWorklet on microphone input
-      or packaged clips, keeps microphone playback muted, and reports
-      background-noise events from the render thread.
+      This demo runs the stream-based detector on microphone input or packaged
+      clips, keeps microphone playback muted, and reports background-noise
+      events from Silero speech probabilities plus RMS windows.
     </p>
     <p class="status" id="status">Idle. Start a source to tune detector thresholds.</p>
   </section>
@@ -183,7 +184,7 @@ let eventCount = 0;
 let lastSpeechFrameRatio: number | null = null;
 
 runtimeMetrics.innerHTML = [
-  metric("Worklet", "idle"),
+  metric("Detector", "idle"),
   metric("Context", "idle"),
   metric("Sample rate", "-"),
 ].join("");
@@ -236,7 +237,7 @@ function finiteInputValue(input: HTMLInputElement, label: string): number {
   return input.valueAsNumber;
 }
 
-function readWorkletOptions(): BackgroundNoiseDetectorAudioWorkletOptions {
+function readDetectorOptions(): BackgroundNoiseDetectorRuntimeOptions {
   const speechProbabilityThreshold = finiteInputValue(
     speechThresholdInput,
     "Speech threshold"
@@ -291,7 +292,7 @@ async function createSource(
         channelCount: 1,
         echoCancellation: false,
         noiseSuppression: false,
-        autoGainControl: false,
+        autoGainControl: true,
       },
     });
 
@@ -371,7 +372,7 @@ function startRmsLoop(graph: ActiveGraph): void {
 
 function updateRuntimeMetrics(graph: ActiveGraph, frameSamples: number): void {
   runtimeMetrics.innerHTML = [
-    metric("Worklet", "ready"),
+    metric("Detector", "ready"),
     metric("Source", graph.sourceMode),
     metric("Context", graph.context.state),
     metric("Sample rate", `${graph.context.sampleRate} Hz`),
@@ -402,11 +403,12 @@ async function start(): Promise<void> {
   let pendingBufferSource: AudioBufferSourceNode | null = null;
   let pendingAnalyserNode: AnalyserNode | null = null;
   let pendingOutputGain: GainNode | null = null;
-  let pendingWorklet: BackgroundNoiseDetectorAudioWorkletHandle | null = null;
+  let pendingVadInput: MediaStreamAudioDestinationNode | null = null;
+  let pendingDetector: BackgroundNoiseDetectorHandle | null = null;
   let pendingStopMessages: (() => void) | null = null;
 
   try {
-    const options = readWorkletOptions();
+    const options = readDetectorOptions();
     const sourceMode = readSourceMode();
     setStatus(sourceMode === "microphone" ? "Requesting microphone permission..." : "Loading clip...");
 
@@ -427,12 +429,24 @@ async function start(): Promise<void> {
       gain: readOutputGain(sourceMode),
     });
     pendingOutputGain = outputGain;
+    const vadInput =
+      sourceMode === "clip" ? context.createMediaStreamDestination() : undefined;
+    pendingVadInput = vadInput ?? null;
+    const detectorStream = microphoneStream ?? vadInput?.stream;
 
-    setStatus("Creating background noise detector worklet...");
-    const worklet = await createBackgroundNoiseDetectorAudioWorklet(context, options);
-    pendingWorklet = worklet;
-    const stopMessages = observeBackgroundNoiseDetectorAudioWorkletMessages(
-      worklet,
+    if (!detectorStream) {
+      throw new Error("Could not create detector input stream.");
+    }
+
+    setStatus("Creating background noise detector...");
+    const detector = await createBackgroundNoiseDetector(
+      context,
+      detectorStream,
+      options
+    );
+    pendingDetector = detector;
+    const stopMessages = observeBackgroundNoiseDetectorMessages(
+      detector,
       (message) => {
         appendMessage(JSON.stringify(message, null, 2));
 
@@ -453,15 +467,16 @@ async function start(): Promise<void> {
     pendingStopMessages = stopMessages;
 
     await context.resume();
-    const readyMessage = await worklet.ready;
+    const readyMessage = await detector.ready;
 
     const graph: ActiveGraph = {
       context,
       sourceMode,
       sourceNode,
       analyserNode,
+      vadInput,
       outputGain,
-      worklet,
+      detector,
       stopMessages,
       animationFrameId: 0,
       frameSamples: readyMessage.frameSamples,
@@ -477,30 +492,31 @@ async function start(): Promise<void> {
     pendingBufferSource = null;
     pendingAnalyserNode = null;
     pendingOutputGain = null;
-    pendingWorklet = null;
+    pendingVadInput = null;
+    pendingDetector = null;
     pendingStopMessages = null;
     sourceNode.connect(analyserNode);
-    sourceNode.connect(worklet.node).connect(outputGain).connect(context.destination);
+    if (vadInput) {
+      sourceNode.connect(vadInput);
+    }
+    sourceNode.connect(outputGain).connect(context.destination);
     startRmsLoop(graph);
     updateRuntimeMetrics(graph, readyMessage.frameSamples);
     startButton.textContent = "Restart";
     setStatus(
       sourceMode === "microphone"
         ? "Detector ready. Make fan, keyboard, speech, and silence checks."
-        : "Detector ready. The selected clip is looping through the worklet."
+        : "Detector ready. The selected clip is looping through the detector."
     );
-
-    worklet.node.addEventListener("processorerror", () => {
-      setStatus("AudioWorklet processor error.", true);
-    });
   } catch (error) {
     await stop();
     pendingStopMessages?.();
-    pendingWorklet?.dispose();
+    pendingDetector?.dispose();
     pendingMicrophoneStream?.getTracks().forEach((track) => track.stop());
     pendingBufferSource?.stop();
     pendingSourceNode?.disconnect();
     pendingAnalyserNode?.disconnect();
+    pendingVadInput?.disconnect();
     pendingOutputGain?.disconnect();
 
     if (pendingContext && pendingContext.state !== "closed") {
@@ -525,18 +541,19 @@ async function stop(): Promise<void> {
 
   window.cancelAnimationFrame(graph.animationFrameId);
   graph.stopMessages();
-  graph.worklet.dispose();
+  graph.detector.dispose();
   graph.bufferSource?.stop();
   graph.microphoneStream?.getTracks().forEach((track) => track.stop());
   graph.sourceNode.disconnect();
   graph.analyserNode.disconnect();
+  graph.vadInput?.disconnect();
   graph.outputGain.disconnect();
   await graph.context.close();
 
   stopButton.disabled = true;
   startButton.textContent = "Start";
   runtimeMetrics.innerHTML = [
-    metric("Worklet", "idle"),
+    metric("Detector", "idle"),
     metric("Context", "closed"),
     metric("Sample rate", "-"),
   ].join("");

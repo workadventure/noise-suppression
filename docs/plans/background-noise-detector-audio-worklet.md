@@ -1,8 +1,12 @@
 # Background Noise Detector AudioWorklet Plan
 
-- Status: Draft
+- Status: Superseded by
+  [background-noise-detector-silero-vad-web.md](./background-noise-detector-silero-vad-web.md)
 - Date: 2026-06-12
 - Owner: Codex
+
+The active Silero implementation uses a stream-based detector API and does not
+create a dedicated background-noise `AudioWorkletNode`.
 
 ## Goal
 
