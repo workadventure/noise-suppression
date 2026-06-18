@@ -77,7 +77,6 @@ The implementation needs a small latency budget. Silero operates on chunks
 rather than individual 128-sample render quanta, so background-noise events
 should remain windowed and advisory rather than instantaneous.
 
-The existing libfvad vendored code can stay temporarily while the replacement
-is built and compared. Once the Silero backend is validated against the demo
-clips and browser tests, libfvad should be removed unless we intentionally keep
-it as a fallback.
+The Silero backend has been validated against the demo clips and browser tests.
+The libfvad wrapper, tests, Wasm artifact, and vendored source have therefore
+been removed rather than retained as an unused fallback.

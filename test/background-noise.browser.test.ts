@@ -4,7 +4,9 @@ import {
   isBackgroundNoiseDetectedMessage,
   observeBackgroundNoiseDetectorMessages,
 } from "../src/background-noise";
+import cleanVoiceClipUrl from "../clips/clean-voice.wav?url";
 import pureNoiseClipUrl from "../clips/pure-noise.wav?url";
+import whiteNoiseClipUrl from "../clips/white-noise-15s.wav?url";
 import type {
   BackgroundNoiseDetectedMessage,
   BackgroundNoiseDetectorHandle,
@@ -34,6 +36,40 @@ function waitForBackgroundNoiseDetected(
       }
     );
   });
+}
+
+async function decodeAudioFixture(
+  context: AudioContext,
+  fixtureUrl: string
+): Promise<AudioBuffer> {
+  const response = await fetch(fixtureUrl);
+  return context.decodeAudioData(await response.arrayBuffer());
+}
+
+function calculateAudioBufferRms(buffer: AudioBuffer): number {
+  let sum = 0;
+  let sampleCount = 0;
+
+  for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
+    const samples = buffer.getChannelData(channel);
+    sampleCount += samples.length;
+
+    for (const sample of samples) {
+      sum += sample * sample;
+    }
+  }
+
+  return Math.sqrt(sum / sampleCount);
+}
+
+function waitForSourceEnded(source: AudioBufferSourceNode): Promise<void> {
+  return new Promise((resolve) => {
+    source.addEventListener("ended", () => resolve(), { once: true });
+  });
+}
+
+function wait(durationMs: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, durationMs));
 }
 
 describe("background noise stream detector public API", () => {
@@ -83,10 +119,12 @@ describe("background noise stream detector public API", () => {
     }
   }, 20000);
 
-  test("detects the pure-noise fixture as background noise", async () => {
+  test.each([
+    ["pure noise", pureNoiseClipUrl],
+    ["white noise", whiteNoiseClipUrl],
+  ])("detects the %s fixture as background noise", async (_label, fixtureUrl) => {
     const context = new AudioContext({ sampleRate: 16000 });
-    const response = await fetch(pureNoiseClipUrl);
-    const audioBuffer = await context.decodeAudioData(await response.arrayBuffer());
+    const audioBuffer = await decodeAudioFixture(context, fixtureUrl);
     const source = new AudioBufferSourceNode(context, { buffer: audioBuffer });
     const vadInput = context.createMediaStreamDestination();
     let sourceStarted = false;
@@ -116,4 +154,40 @@ describe("background noise stream detector public API", () => {
       await context.close();
     }
   }, 30000);
+
+  test("does not detect clean voice as background noise", async () => {
+    const context = new AudioContext({ sampleRate: 16000 });
+    const audioBuffer = await decodeAudioFixture(context, cleanVoiceClipUrl);
+    const source = new AudioBufferSourceNode(context, { buffer: audioBuffer });
+    const vadInput = context.createMediaStreamDestination();
+    const detectedEvents: BackgroundNoiseDetectedMessage[] = [];
+    let detector: BackgroundNoiseDetectorHandle | undefined;
+    let stopObserving: () => void = () => undefined;
+
+    source.connect(vadInput);
+
+    try {
+      detector = await createBackgroundNoiseDetector(context, vadInput.stream);
+      stopObserving = observeBackgroundNoiseDetectorMessages(detector, (message) => {
+        if (isBackgroundNoiseDetectedMessage(message)) {
+          detectedEvents.push(message);
+        }
+      });
+
+      const sourceEnded = waitForSourceEnded(source);
+      source.start();
+      await context.resume();
+      await sourceEnded;
+      await wait(250);
+
+      expect(audioBuffer.duration).toBeGreaterThan(4);
+      expect(calculateAudioBufferRms(audioBuffer)).toBeGreaterThan(0.02);
+      expect(detectedEvents).toEqual([]);
+    } finally {
+      stopObserving();
+      detector?.dispose();
+      vadInput.disconnect();
+      await context.close();
+    }
+  }, 15000);
 });
