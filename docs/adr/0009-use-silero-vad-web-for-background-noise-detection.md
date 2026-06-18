@@ -39,17 +39,23 @@ of a binary WebRTC VAD result.
 The detector architecture should remain split from the DTLN denoiser:
 
 - keep the background-noise detector as a separate public package entrypoint
-- keep the existing detector event API stable where possible
-- use the AudioWorklet for capture, pass-through, buffering, and cheap audio
-  metrics such as RMS
-- run Silero/ONNX inference outside the AudioWorklet render thread
+- expose the detector as a stream-based API that accepts the `MediaStream` to
+  analyze
+- do not create a dedicated background-noise `AudioWorkletNode`
+- run Silero/ONNX inference outside any custom AudioWorklet render thread
 - combine speech probability, RMS, and sustained-window rules before emitting
   `background-noise-detected`
 
 The first implementation may use `@ricky0123/vad-web` directly to reduce custom
-model/runtime code. If the package API is too microphone-centric for our
-AudioWorklet pipeline, we should vendor or adapt the lower-level pieces while
-preserving the same Silero/ONNX backend choice.
+model/runtime code. Its `MicVAD` API can accept a custom stream through
+`getStream`, so callers can pass microphone streams directly, use
+`HTMLMediaElement.captureStream()` where available, or mirror a Web Audio graph
+into a `MediaStreamDestination` for clips and processed sources.
+
+`@ricky0123/vad-web` may still use its own internal `vad-helper-worklet` when
+`processorType` is `AudioWorklet`. That internal helper performs capture and
+framing for Silero. We should not wrap it in our own pass-through detector
+worklet.
 
 ## Consequences
 
@@ -62,10 +68,10 @@ shows `@ricky0123/vad-web` is several megabytes unpacked and depends on
 `onnxruntime-web`, whose package is much larger. We should lazy-load this path
 only when the background-noise detector is enabled.
 
-ONNX Runtime Web should not run inside the AudioWorklet hot path. The worklet
-must remain deterministic and allocation-light. Inference should run in a
-Worker or another non-render-thread context, with the worklet posting framed
-audio and receiving speech-probability decisions asynchronously.
+ONNX Runtime Web should not run inside any custom AudioWorklet hot path. With
+the `@ricky0123/vad-web` integration, the package's internal helper worklet
+posts framed audio and the main-thread VAD pipeline runs ONNX inference before
+calling our `onFrameProcessed` hook.
 
 The implementation needs a small latency budget. Silero operates on chunks
 rather than individual 128-sample render quanta, so background-noise events

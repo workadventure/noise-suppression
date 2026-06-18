@@ -3,7 +3,7 @@
 ## Goal
 
 Replace the current libfvad/WebRTC VAD backend with a Silero VAD backend for the
-background-noise detector AudioWorklet.
+background-noise detector.
 
 The public feature remains the same: detect sustained loud non-speech input and
 emit `background-noise-detected`.
@@ -14,41 +14,34 @@ Silero/ONNX Runtime Web integration path.
 ## Constraints
 
 - Keep this detector independent from the DTLN noise-suppression worklet.
-- Keep the public background-noise detector entrypoint stable where possible.
-- Do not run ONNX Runtime Web inference directly in `AudioWorkletProcessor.process`.
-- Keep the AudioWorklet render path allocation-light.
+- Expose the detector as a stream-based API; callers provide the `MediaStream`
+  to analyze.
+- Do not create a dedicated background-noise `AudioWorkletNode`.
+- Do not run ONNX Runtime Web inference inside any custom
+  `AudioWorkletProcessor.process`.
 - Lazy-load Silero assets only when the background-noise detector is used.
 - Preserve microphone pass-through behavior.
 - Keep demo clip playback available for repeatable tuning.
 
 ## Target Architecture
 
-Use a three-part pipeline:
+Use a two-part pipeline:
 
 1. Main thread API
-   - creates the `AudioWorkletNode`
-   - creates a dedicated VAD Worker
-   - wires messages between the worklet, worker, and consumer
-   - exposes the existing detector handle and event observer API
+   - accepts an `AudioContext`, a `MediaStream`, and detector options
+   - initializes `@ricky0123/vad-web`
+   - runs the `BackgroundNoiseDetector` aggregation from `onFrameProcessed`
+   - exposes a detector handle and event observer API
 
-2. AudioWorkletProcessor
-   - receives microphone or clip audio
-   - copies input to output
-   - computes cheap per-frame metrics such as RMS
-   - buffers/resamples audio into Silero-sized chunks if needed
-   - posts framed audio chunks to the main thread
-   - receives speech-probability decisions from the main thread
-   - runs window aggregation and emits `background-noise-detected`
+2. `@ricky0123/vad-web`
+   - loads Silero and ONNX Runtime Web assets
+   - uses the supplied stream via `getStream`
+   - may use its own internal `vad-helper-worklet` to capture and frame audio
+   - returns speech probability and framed audio through callbacks
 
-3. VAD Worker
-   - loads `@ricky0123/vad-web` or the package's lower-level Silero utilities
-   - initializes ONNX Runtime Web assets
-   - accepts mono `Float32Array` audio chunks
-   - returns speech probability and chunk timing metadata
-
-If `@ricky0123/vad-web` is too tightly coupled to its own microphone pipeline,
-adapt or vendor the minimal lower-level Silero model code instead of forcing the
-whole `MicVAD` abstraction into this worklet.
+Callers own graph wiring. Microphone streams can be passed directly. Web Audio
+sources such as demo clips can be mirrored into a `MediaStreamDestination` and
+passed to the detector without creating our own pass-through worklet.
 
 ## Step 1: Add the Silero Dependency Experiment
 
@@ -61,7 +54,7 @@ whole `MicVAD` abstraction into this worklet.
    - ONNX model size
    - ONNX Wasm backend size
 5. Add a small local script or browser test page that loads the package without
-   the existing AudioWorklet.
+   a dedicated detector AudioWorklet.
 
 Acceptance checks:
 
@@ -92,53 +85,42 @@ Acceptance checks:
 - the detector core can be unit-tested with fake probability sequences
 - libfvad-specific types do not leak into the public API
 
-## Step 3: Build the VAD Worker
+## Step 3: Build the Stream VAD Integration
 
-1. Add a dedicated worker entrypoint, for example:
-   - `src/background-noise-vad-worker.ts`
-2. Implement a strict worker message protocol:
-   - `init`
-   - `ready`
-   - `process-chunk`
-   - `speech-probability`
-   - `error`
-   - `dispose`
-3. Transfer audio buffers instead of cloning where possible.
-4. Load `@ricky0123/vad-web` lazily inside the worker.
-5. Configure ONNX Runtime Web asset paths so Vite packaging works both in dev
-   and package builds.
-6. Add a request id or chunk sequence id so delayed worker responses can be
-   matched to the right audio window.
+1. Add a public stream entrypoint, for example:
+   - `src/background-noise.ts`
+2. Initialize `@ricky0123/vad-web` with:
+   - the caller-provided `AudioContext`
+   - `getStream` returning the caller-provided `MediaStream`
+   - package model and ONNX Runtime asset paths
+3. Configure Silero model options and speech thresholds.
+4. Forward `onFrameProcessed` frames and speech probabilities into
+   `BackgroundNoiseDetector`.
+5. Keep stream lifecycle ownership with the caller; disposing the detector must
+   not stop microphone tracks that the caller provided.
 
 Acceptance checks:
 
-- worker initializes once and reports `ready`
-- worker returns probability results for sample clips
-- worker errors are propagated to the public handle
-- disposing the detector terminates the worker
+- detector initializes once and exposes a `ready` promise
+- detector returns probability-driven background-noise events for sample clips
+- initialization errors reject the creation promise
+- disposing the detector destroys the `MicVAD` instance without stopping caller
+  streams
 
-## Step 4: Update the AudioWorklet Message Protocol
+## Step 4: Remove the Dedicated AudioWorklet Protocol
 
-1. Keep audio pass-through in the processor.
-2. Replace libfvad frame processing with chunk capture for Silero.
-3. Add processor-to-main messages:
-   - `vad-chunk`
-   - `background-noise-detected`
-   - `ready`
-   - `error`
-4. Add main-to-processor messages:
-   - `speech-probability`
-   - `set-options`
-   - `dispose`
-5. Avoid per-render-quantum allocations in `process`.
-6. Reuse ring buffers for chunk assembly.
-7. Keep `process` independent from async initialization failures.
+1. Delete the custom background-noise `AudioWorkletProcessor`.
+2. Delete the custom background-noise worklet message protocol.
+3. Delete the pass-through node API.
+4. Route Web Audio sources that are not already streams through
+   `MediaStreamDestination` at the caller/demo layer.
+5. Let `@ricky0123/vad-web` handle frame capture internally.
 
 Acceptance checks:
 
-- no ONNX or package logic is imported by the processor bundle
-- worklet continues passing audio while VAD is initializing
-- no `validateXXX` methods are called inside `processFrame` or `process`
+- no custom background-noise worklet bundle is emitted
+- no background-noise pass-through processor remains
+- no `validateXXX` methods are called inside `processFrame`
 
 ## Step 5: Replace Detector Aggregation Logic
 
@@ -172,32 +154,31 @@ Acceptance checks:
 
 ## Step 6: Update the Public Entrypoint
 
-1. Keep `createBackgroundNoiseDetectorAudioWorklet` as the main API.
+1. Replace `createBackgroundNoiseDetectorAudioWorklet` with
+   `createBackgroundNoiseDetector(context, stream, options)`.
 2. Add optional asset path configuration if required:
-   - `vadAssetBasePath`
+   - `baseAssetPath`
    - `onnxWasmBasePath`
 3. Ensure consumers do not need to import `@ricky0123/vad-web` directly.
-4. Keep `observeBackgroundNoiseDetectorAudioWorkletMessages`.
+4. Keep an observer helper for detector messages.
 5. Update message type guards for the new probability fields.
 6. Document lazy loading and expected asset footprint.
 
 Acceptance checks:
 
-- existing TypeScript consumers still compile, except for intentional option
-  additions
+- TypeScript consumers use the new stream-based API
 - package exports remain browser-only
 - non-background-noise entrypoints do not bundle Silero assets
 
 ## Step 7: Update Vite Packaging
 
-1. Add a worker build path for the VAD Worker.
-2. Ensure ONNX Wasm/model assets are emitted and addressable in:
+1. Ensure ONNX Wasm/model assets are emitted and addressable in:
    - local Vite dev server
    - package build
    - browser tests
-3. Keep the existing virtual worklet module behavior.
-4. Verify the package output includes only the assets needed by this feature.
-5. Add README notes for serving the ONNX Wasm/model assets.
+2. Remove the custom background-noise worklet virtual module behavior.
+3. Verify the package output includes only the assets needed by this feature.
+4. Add README notes for serving the ONNX Wasm/model assets.
 
 Acceptance checks:
 
@@ -281,9 +262,9 @@ not opt into background-noise detection.
 
 ### Threading
 
-ONNX inference must stay off the AudioWorklet render thread. Worker latency is
-acceptable because this feature emits advisory background-noise events over
-sustained windows.
+ONNX inference must stay outside any custom AudioWorklet render thread. The
+`@ricky0123/vad-web` helper may still use an internal worklet for frame capture,
+but the package invokes ONNX Runtime Web from its JavaScript VAD pipeline.
 
 ### Browser Compatibility
 

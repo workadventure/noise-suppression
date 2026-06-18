@@ -272,14 +272,18 @@ npm run dev
 
 Useful local pages:
 
+- `/`: landing page linking to all local test pages
+- `/runtime.html`: runtime initialization and single-frame smoke test
 - `/listen-test.html`: microphone, sample clip, or local file playback with a
   worklet/bypass switch
 - `/audio-worklet.html`: minimal AudioWorklet initialization demo
-- `/background-noise-worklet.html`: microphone or sample clip background-noise
+- `/background-noise.html`: microphone or sample clip background-noise
   detector tuning demo
 - `/audio-worklet-validation.html`: validation page for the worklet runtime
+- `/audio-worklet-benchmark.html`: real-time AudioWorklet benchmark
 - `/browser-benchmark-litert.html`: LiteRT benchmark page
 - `/browser-benchmark-compare.html`: single-threaded vs threaded comparison
+- `/browser-benchmark-litert-manual.html`: DevTools benchmark helper harness
 
 The Vite dev server is configured with COOP and COEP headers so
 cross-origin-isolated runtime experiments are possible during local development.
@@ -298,6 +302,8 @@ The library build writes:
 - `dist/index.d.ts`
 - `dist/audio-worklet.js`
 - `dist/audio-worklet.d.ts`
+- `dist/background-noise.js`
+- `dist/background-noise.d.ts`
 - `dist/assets/audio-worklet-processor.js`
 - `dist/assets/*.tflite`
 - `dist/vendor/litert/*`
