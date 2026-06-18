@@ -161,6 +161,8 @@ now:
 - runs typechecking and the package build in one job
 - runs browser tests in a three-entry Chromium, Firefox, and WebKit matrix
 - installs only the Playwright engine needed by each matrix entry
+- configures a PulseAudio null sink for Firefox because its headless Linux
+  `AudioContext` requires an audio output device
 - uploads `dist/` from the build job
 - gates publishing on both build and browser-test jobs
 - downloads the build artifact in the publish job instead of rebuilding it
