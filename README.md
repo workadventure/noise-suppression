@@ -444,13 +444,21 @@ Useful local pages:
 The Vite dev server is configured with COOP and COEP headers so
 cross-origin-isolated runtime experiments are possible during local development.
 
+The same pages are deployed from `main` to
+[GitHub Pages](https://workadventure.github.io/noise-suppression/). GitHub Pages
+does not provide the COOP and COEP headers required by threaded LiteRT, so the
+hosted runtime comparison is limited to the single-threaded path.
+
 ## Build And Test
 
 ```bash
 npm run typecheck
 npm run build
+npm run build:pages
 npm run test:browser
 ```
+
+The Pages build writes the compiled multi-page test site to `pages-dist/`.
 
 The library build writes:
 

@@ -16,6 +16,18 @@ const resolvedDefaultAssetsVirtualId = `\0${defaultAssetsVirtualId}`;
 const backgroundNoiseDetectorSileroAssetsVirtualId =
   "virtual:background-noise-detector-silero-assets";
 const resolvedBackgroundNoiseDetectorSileroAssetsVirtualId = `\0${backgroundNoiseDetectorSileroAssetsVirtualId}`;
+const demoPageFileNames = [
+  "index.html",
+  "runtime.html",
+  "listen-test.html",
+  "audio-worklet.html",
+  "background-noise.html",
+  "audio-worklet-validation.html",
+  "audio-worklet-benchmark.html",
+  "browser-benchmark-litert.html",
+  "browser-benchmark-compare.html",
+  "browser-benchmark-litert-manual.html",
+];
 
 const packagedLiteRtAssets = [
   "litert_wasm_compat_internal.js",
@@ -368,7 +380,9 @@ async function buildAudioWorkletDevBundle() {
   return chunk.code;
 }
 
-export default defineConfig(({ command }) => {
+export default defineConfig(({ command, mode }) => {
+  const isPagesBuild = command === "build" && mode === "pages";
+
   return {
     assetsInclude: ["**/*.tflite", "**/*.tflite?inline", "**/*.onnx"],
     base: "./",
@@ -403,52 +417,66 @@ export default defineConfig(({ command }) => {
         "@litertjs/wasm-utils": litertWasmUtilsAlias,
       },
     },
-    build: {
-      lib: {
-        entry: {
-          index: path.resolve(rootDir, "src/index.ts"),
-          "audio-worklet": path.resolve(rootDir, "src/audio-worklet.ts"),
-          "background-noise": path.resolve(
-            rootDir,
-            "src/background-noise.ts"
-          ),
-          vite: path.resolve(rootDir, "src/vite.ts"),
-        },
-        name: "NoiseSuppression",
-        formats: ["es"],
-        fileName: (_format, entryName) => `${entryName}.js`,
-      },
-      target: "es2022",
-      sourcemap: true,
-      rollupOptions: {
-        external: ["@ricky0123/vad-web", "fft.js", "node:fs", "node:url"],
-        output: {
-          assetFileNames(assetInfo) {
-            const originalFileName =
-              assetInfo.originalFileNames?.[0] ?? assetInfo.name ?? "";
-
-            if (originalFileName.endsWith(".tflite")) {
-              return "assets/[name][extname]";
-            }
-
-            if (originalFileName.includes("forks/litertjs-core/wasm/")) {
-              return "vendor/litert/[name][extname]";
-            }
-
-            if (originalFileName.includes("@ricky0123/vad-web/dist/")) {
-              return "vendor/silero/[name][extname]";
-            }
-
-            if (originalFileName.includes("onnxruntime-web/dist/")) {
-              return "vendor/onnxruntime/[name][extname]";
-            }
-
-            return "assets/[name]-[hash][extname]";
+    build: isPagesBuild
+      ? {
+          target: "es2022",
+          outDir: "pages-dist",
+          emptyOutDir: true,
+          rollupOptions: {
+            input: Object.fromEntries(
+              demoPageFileNames.map((fileName) => [
+                path.basename(fileName, ".html"),
+                path.resolve(rootDir, fileName),
+              ])
+            ),
           },
+        }
+      : {
+          lib: {
+            entry: {
+              index: path.resolve(rootDir, "src/index.ts"),
+              "audio-worklet": path.resolve(rootDir, "src/audio-worklet.ts"),
+              "background-noise": path.resolve(
+                rootDir,
+                "src/background-noise.ts"
+              ),
+              vite: path.resolve(rootDir, "src/vite.ts"),
+            },
+            name: "NoiseSuppression",
+            formats: ["es"],
+            fileName: (_format, entryName) => `${entryName}.js`,
+          },
+          target: "es2022",
+          sourcemap: true,
+          rollupOptions: {
+            external: ["@ricky0123/vad-web", "fft.js", "node:fs", "node:url"],
+            output: {
+              assetFileNames(assetInfo) {
+                const originalFileName =
+                  assetInfo.originalFileNames?.[0] ?? assetInfo.name ?? "";
+
+                if (originalFileName.endsWith(".tflite")) {
+                  return "assets/[name][extname]";
+                }
+
+                if (originalFileName.includes("forks/litertjs-core/wasm/")) {
+                  return "vendor/litert/[name][extname]";
+                }
+
+                if (originalFileName.includes("@ricky0123/vad-web/dist/")) {
+                  return "vendor/silero/[name][extname]";
+                }
+
+                if (originalFileName.includes("onnxruntime-web/dist/")) {
+                  return "vendor/onnxruntime/[name][extname]";
+                }
+
+                return "assets/[name]-[hash][extname]";
+              },
+            },
+          },
+          emptyOutDir: true,
         },
-      },
-      emptyOutDir: true,
-    },
     server: {
       headers: {
         "Cross-Origin-Opener-Policy": "same-origin",

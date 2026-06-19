@@ -141,9 +141,11 @@ correctness or performance assertions.
 
 [`package.json`](../../package.json) now includes:
 
+- `build:pages`
 - `test:browser`
 
-That script runs Vitest in browser mode. Playwright-managed browser binaries
+The Pages script builds all demo HTML entrypoints into `pages-dist/`. The test
+script runs Vitest in browser mode. Playwright-managed browser binaries
 are used by default; `PLAYWRIGHT_CHROMIUM_EXECUTABLE` can select a custom
 Chromium binary when needed. `VITEST_BROWSER` can select one of `chromium`,
 `firefox`, or `webkit`; without it, all three run locally.
@@ -166,6 +168,13 @@ now:
 - uploads `dist/` from the build job
 - gates publishing on both build and browser-test jobs
 - downloads the build artifact in the publish job instead of rebuilding it
+
+The separate [Pages workflow](../../.github/workflows/pages.yml) builds and
+deploys the multi-page test site after changes reach `main`. It intentionally
+does not depend on the browser-test matrix because the retained WebKit failure
+would otherwise prevent every deployment. GitHub Pages also cannot provide the
+COOP and COEP response headers used by the local Vite server, so hosted tests
+fall back to non-threaded runtime behavior.
 
 ## Results
 
