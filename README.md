@@ -2,6 +2,9 @@
 
 Browser-side noise suppression for realtime voice applications.
 
+[Try the models in the browser test site](https://workadventure.github.io/noise-suppression/),
+including the live noise suppression and background noise detector demos.
+
 This package runs the DTLN speech denoising models in the browser with
 LiteRT.js. Its primary integration path is an `AudioWorklet` that can sit
 between a microphone track and a WebRTC peer connection.
