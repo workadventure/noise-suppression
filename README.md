@@ -1,9 +1,14 @@
 # @workadventure/noise-suppression
 
-Browser-side noise suppression for realtime voice applications.
+[![npm version](https://img.shields.io/npm/v/@workadventure/noise-suppression)](https://www.npmjs.com/package/@workadventure/noise-suppression)
+[![CI](https://github.com/workadventure/noise-suppression/actions/workflows/ci.yml/badge.svg)](https://github.com/workadventure/noise-suppression/actions/workflows/ci.yml)
+[![npm downloads](https://img.shields.io/npm/dm/@workadventure/noise-suppression)](https://www.npmjs.com/package/@workadventure/noise-suppression)
+[![License](https://img.shields.io/github/license/workadventure/noise-suppression)](./LICENSE)
+[![Test site](https://img.shields.io/badge/test_site-live-0f766e)](https://workadventure.github.io/noise-suppression/)
 
-[Try the models in the browser test site](https://workadventure.github.io/noise-suppression/),
-including the live noise suppression and background noise detector demos.
+Browser-side noise suppression and noise-detection for realtime voice applications.
+
+#### 👉 [Try noise suppression and noise detection in your browser](https://workadventure.github.io/noise-suppression/) 👈
 
 This package runs the DTLN speech denoising models in the browser with
 LiteRT.js. Its primary integration path is an `AudioWorklet` that can sit
