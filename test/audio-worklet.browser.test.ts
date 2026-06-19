@@ -1,33 +1,10 @@
 import { describe, expect, test } from "vitest";
-import { userEvent } from "vitest/browser";
 import {
   createNoiseSuppressionAudioWorklet,
   isNoiseSuppressionProcessingStartedMessage,
   observeNoiseSuppressionAudioWorkletMessages,
 } from "../src/audio-worklet";
-
-async function resumeAudioContext(context: AudioContext): Promise<void> {
-  const button = document.createElement("button");
-  button.textContent = "Start audio";
-  document.body.append(button);
-
-  const resumed = new Promise<void>((resolve, reject) => {
-    button.addEventListener(
-      "click",
-      () => {
-        void context.resume().then(resolve, reject);
-      },
-      { once: true }
-    );
-  });
-
-  try {
-    await userEvent.click(button);
-    await resumed;
-  } finally {
-    button.remove();
-  }
-}
+import { resumeAudioContext } from "./resume-audio-context";
 
 function waitForProcessingStart(
   worklet: Awaited<ReturnType<typeof createNoiseSuppressionAudioWorklet>>,
