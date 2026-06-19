@@ -265,11 +265,15 @@ const liteRtAssetUrls = [
   ${liteRtAssetReferences.map((referenceId) => `import.meta.ROLLUP_FILE_URL_${referenceId}`).join(",\n  ")}
 ];
 
-export const defaultLiteRtWasmRoot = new URL(".", liteRtAssetUrls[0]).toString();
+export const defaultLiteRtWasmRoot = assetDirectory(liteRtAssetUrls[0]);
 export const defaultLiteRtWasmInternalUrl = import.meta.ROLLUP_FILE_URL_${liteRtRefByFile.get("vendor/litert/litert_wasm_internal.wasm")};
 export const defaultLiteRtWasmCompatUrl = import.meta.ROLLUP_FILE_URL_${liteRtRefByFile.get("vendor/litert/litert_wasm_compat_internal.wasm")};
 export const defaultModel1Url = import.meta.ROLLUP_FILE_URL_${modelAssetReferences.get("defaultModel1Url")};
 export const defaultModel2Url = import.meta.ROLLUP_FILE_URL_${modelAssetReferences.get("defaultModel2Url")};
+
+function assetDirectory(assetUrl) {
+  return assetUrl.slice(0, assetUrl.lastIndexOf("/") + 1);
+}
 `;
     },
   };
@@ -325,8 +329,12 @@ const onnxRuntimeAssetUrls = [
   ${onnxRuntimeAssetReferences.map((referenceId) => `import.meta.ROLLUP_FILE_URL_${referenceId}`).join(",\n  ")}
 ];
 
-export const defaultBackgroundNoiseDetectorBaseAssetPath = new URL(".", sileroAssetUrls[0]).toString();
-export const defaultBackgroundNoiseDetectorOnnxWasmBasePath = new URL(".", onnxRuntimeAssetUrls[0]).toString();
+export const defaultBackgroundNoiseDetectorBaseAssetPath = assetDirectory(sileroAssetUrls[0]);
+export const defaultBackgroundNoiseDetectorOnnxWasmBasePath = assetDirectory(onnxRuntimeAssetUrls[0]);
+
+function assetDirectory(assetUrl) {
+  return assetUrl.slice(0, assetUrl.lastIndexOf("/") + 1);
+}
 `;
     },
   };
