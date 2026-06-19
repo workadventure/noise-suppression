@@ -54,7 +54,10 @@ describe("background noise detector", () => {
   });
 
   test("does not emit when the candidate window has too much voice", () => {
-    const detector = new BackgroundNoiseDetector();
+    const detector = new BackgroundNoiseDetector({
+      maxSpeechFrameRatio: 0.2,
+      maxAverageSpeechProbability: 1,
+    });
     const results = processFrames(
       detector,
       50,

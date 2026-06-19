@@ -66,9 +66,9 @@ export const DEFAULT_BACKGROUND_NOISE_DETECTOR_OPTIONS: ResolvedBackgroundNoiseD
   triggerRms: 0.01,
   noisyRms: 0.02,
   analysisWindowMs: 1500,
-  maxSpeechFrameRatio: 0.2,
+  maxSpeechFrameRatio: 0.75,
   speechProbabilityThreshold: 0.3,
-  maxAverageSpeechProbability: 0.2,
+  maxAverageSpeechProbability: 0.5,
   cooldownMs: 15000,
 };
 

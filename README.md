@@ -295,8 +295,8 @@ Detector options and defaults:
 | `noisyRms` | `0.02` | Minimum average RMS required to emit an event |
 | `analysisWindowMs` | `1500` | Sustained-noise window duration |
 | `speechProbabilityThreshold` | `0.3` | Probability at which a frame counts as speech |
-| `maxSpeechFrameRatio` | `0.2` | Maximum ratio of speech frames in the window |
-| `maxAverageSpeechProbability` | `0.2` | Maximum average speech probability in the window |
+| `maxSpeechFrameRatio` | `0.75` | Maximum ratio of speech frames in the window |
+| `maxAverageSpeechProbability` | `0.5` | Maximum average speech probability in the window |
 | `cooldownMs` | `15000` | Minimum delay between emitted events |
 | `sileroModel` | `"v5"` | Silero model; `"legacy"` is also available |
 | `processorType` | `"AudioWorklet"` | Frame-capture mechanism used internally by `vad-web` |
