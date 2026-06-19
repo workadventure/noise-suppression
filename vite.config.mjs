@@ -230,6 +230,8 @@ function defaultAssetsPlugin() {
       if (command === "serve") {
         return `
 export const defaultLiteRtWasmRoot = "/forks/litertjs-core/wasm/";
+export const defaultLiteRtWasmInternalUrl = "/forks/litertjs-core/wasm/litert_wasm_internal.wasm";
+export const defaultLiteRtWasmCompatUrl = "/forks/litertjs-core/wasm/litert_wasm_compat_internal.wasm";
 export const defaultModel1Url = "/model/model_quant_1.tflite";
 export const defaultModel2Url = "/model/model_quant_2.tflite";
 `;
@@ -254,12 +256,18 @@ export const defaultModel2Url = "/model/model_quant_2.tflite";
         ])
       );
 
+      const liteRtRefByFile = new Map(
+        packagedLiteRtAssets.map((asset, index) => [asset.fileName, liteRtAssetReferences[index]])
+      );
+
       return `
 const liteRtAssetUrls = [
   ${liteRtAssetReferences.map((referenceId) => `import.meta.ROLLUP_FILE_URL_${referenceId}`).join(",\n  ")}
 ];
 
 export const defaultLiteRtWasmRoot = new URL(".", liteRtAssetUrls[0]).toString();
+export const defaultLiteRtWasmInternalUrl = import.meta.ROLLUP_FILE_URL_${liteRtRefByFile.get("vendor/litert/litert_wasm_internal.wasm")};
+export const defaultLiteRtWasmCompatUrl = import.meta.ROLLUP_FILE_URL_${liteRtRefByFile.get("vendor/litert/litert_wasm_compat_internal.wasm")};
 export const defaultModel1Url = import.meta.ROLLUP_FILE_URL_${modelAssetReferences.get("defaultModel1Url")};
 export const defaultModel2Url = import.meta.ROLLUP_FILE_URL_${modelAssetReferences.get("defaultModel2Url")};
 `;
@@ -335,7 +343,7 @@ async function buildAudioWorkletDevBundle() {
       {
         name: "noise-suppression-audio-worklet-import-meta-url",
         transform(code, id) {
-          if (!id.endsWith("/forks/litertjs-core/wasm/litert_wasm_internal.mjs")) {
+          if (!/\/forks\/litertjs-core\/wasm\/litert_wasm(_compat)?_internal\.mjs$/.test(id)) {
             return null;
           }
 

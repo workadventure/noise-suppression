@@ -1,5 +1,7 @@
 import {
   defaultLiteRtWasmRoot,
+  defaultLiteRtWasmInternalUrl,
+  defaultLiteRtWasmCompatUrl,
   defaultModel1Url,
   defaultModel2Url,
 } from "virtual:noise-suppression-default-assets";
@@ -40,6 +42,10 @@ export function resolveBrowserCpuThreadCount(requested: number | undefined): num
 
 export function resolveDefaultLiteRtWasmRoot(): string {
   return defaultLiteRtWasmRoot;
+}
+
+export function resolveLiteRtWasmUrl(variant: "relaxed" | "compat"): string {
+  return variant === "compat" ? defaultLiteRtWasmCompatUrl : defaultLiteRtWasmInternalUrl;
 }
 
 export function resolveDefaultModel1Url(): string {
