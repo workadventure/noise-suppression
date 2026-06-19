@@ -10,17 +10,24 @@ Browser-side noise suppression and noise-detection for realtime voice applicatio
 
 #### 👉 [Try noise suppression and noise detection in your browser](https://workadventure.github.io/noise-suppression/) 👈
 
-This package runs the DTLN speech denoising models in the browser with
-LiteRT.js. Its primary integration path is an `AudioWorklet` that can sit
-between a microphone track and a WebRTC peer connection.
+This package provides two complementary tools for handling noisy microphone
+input directly in the browser:
+
+- **Noise suppression** runs the DTLN speech-denoising models with LiteRT.js.
+  Its primary integration path is an `AudioWorklet` that can sit between a
+  microphone track and a WebRTC peer connection.
+- **[Background noise detection](#detect-sustained-background-noise)** identifies
+  sustained noise that is unlikely to contain speech, so an application can
+  warn the user or suggest enabling noise suppression.
 
 Use it when you want to:
 
 - clean microphone audio before sending it to a WebRTC call
+- detect when a user's microphone is picking up sustained background noise
 - keep processing local to the browser
 
-The package makes it as easy as possible to embed noise suppression by
-pre-bundling all the required assets in one AudioWorklet.
+The package pre-bundles the assets required by both features and exposes
+high-level browser APIs for adding them to an application.
 
 The package is browser-only. It does not ship a native addon, Rust runtime, or
 Node backend. If you are looking for server-side variants, take a look at
