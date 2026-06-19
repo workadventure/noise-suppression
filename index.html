@@ -58,6 +58,38 @@
         font-size: 1.05rem;
       }
 
+      .page-section {
+        display: grid;
+        gap: 18px;
+      }
+
+      .page-section + .page-section {
+        margin-top: 48px;
+        border-top: 1px solid rgba(19, 34, 56, 0.1);
+        padding-top: 40px;
+      }
+
+      .section-heading {
+        display: grid;
+        gap: 8px;
+      }
+
+      .section-heading h2,
+      .section-heading p {
+        margin: 0;
+      }
+
+      .section-heading h2 {
+        font-size: 1.6rem;
+        letter-spacing: -0.03em;
+      }
+
+      .section-heading p {
+        max-width: 62ch;
+        color: #5f7488;
+        line-height: 1.5;
+      }
+
       .page-grid {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
@@ -85,12 +117,12 @@
         transform: translateY(-2px);
       }
 
-      .page-card h2,
+      .page-card h3,
       .page-card p {
         margin: 0;
       }
 
-      .page-card h2 {
+      .page-card h3 {
         font-size: 1.08rem;
         letter-spacing: -0.02em;
       }
@@ -99,6 +131,20 @@
         color: #5f7488;
         line-height: 1.5;
       }
+
+      .page-card--featured {
+        min-height: 190px;
+        border-color: rgba(15, 118, 110, 0.24);
+        padding: 26px;
+        background:
+          linear-gradient(135deg, rgba(240, 253, 250, 0.96), rgba(239, 246, 255, 0.94));
+        box-shadow: 0 22px 54px rgba(15, 118, 110, 0.13);
+      }
+
+      .page-card--featured h3 {
+        font-size: 1.35rem;
+      }
+
     </style>
   </head>
   <body>
@@ -112,43 +158,58 @@
         </p>
       </header>
 
-      <section class="page-grid" aria-label="Available test pages">
-        <a class="page-card" href="./runtime.html">
-          <h2>Runtime smoke test</h2>
-          <p>Load both DTLN models and run one synchronous denoise pass.</p>
-        </a>
-        <a class="page-card" href="./listen-test.html">
-          <h2>Listen test</h2>
-          <p>Compare processed and bypassed audio from a microphone, sample, or local file.</p>
-        </a>
-        <a class="page-card" href="./audio-worklet.html">
-          <h2>AudioWorklet demo</h2>
-          <p>Initialize and exercise the real-time AudioWorklet pipeline.</p>
-        </a>
-        <a class="page-card" href="./background-noise.html">
-          <h2>Background noise detector</h2>
-          <p>Test and tune background-noise detection with live or sample audio.</p>
-        </a>
-        <a class="page-card" href="./audio-worklet-validation.html">
-          <h2>AudioWorklet validation</h2>
-          <p>Validate runtime behavior with multiple AudioWorklet processor variants.</p>
-        </a>
-        <a class="page-card" href="./audio-worklet-benchmark.html">
-          <h2>AudioWorklet benchmark</h2>
-          <p>Measure real-time worklet processing performance.</p>
-        </a>
-        <a class="page-card" href="./browser-benchmark-litert.html">
-          <h2>LiteRT profile benchmark</h2>
-          <p>Profile the LiteRT-backed denoise runtime over repeated calls.</p>
-        </a>
-        <a class="page-card" href="./browser-benchmark-compare.html">
-          <h2>Runtime comparison</h2>
-          <p>Compare single-threaded and threaded runtime performance.</p>
-        </a>
-        <a class="page-card" href="./browser-benchmark-litert-manual.html">
-          <h2>Manual benchmark harness</h2>
-          <p>Expose benchmark helpers for ad hoc experiments in DevTools.</p>
-        </a>
+      <section class="page-section" aria-labelledby="live-demos-title">
+        <div class="section-heading">
+          <h2 id="live-demos-title">Live demos</h2>
+          <p>Try the models directly with live input or sample audio.</p>
+        </div>
+        <div class="page-grid">
+          <a class="page-card page-card--featured" href="./listen-test.html">
+            <h3>Noise suppression live test</h3>
+            <p>Try noise suppression with your microphone, built-in samples, or a local audio file.</p>
+          </a>
+          <a class="page-card page-card--featured" href="./background-noise.html">
+            <h3>Background noise detector live test</h3>
+            <p>Try background-noise detection with live microphone input or sample audio.</p>
+          </a>
+        </div>
+      </section>
+
+      <section class="page-section" aria-labelledby="technical-tests-title">
+        <div class="section-heading">
+          <h2 id="technical-tests-title">Technical tests</h2>
+          <p>Runtime validation and benchmarks for development and compatibility testing.</p>
+        </div>
+        <div class="page-grid">
+          <a class="page-card" href="./runtime.html">
+            <h3>Runtime smoke test</h3>
+            <p>Load both DTLN models and run one synchronous denoise pass.</p>
+          </a>
+          <a class="page-card" href="./audio-worklet.html">
+            <h3>AudioWorklet demo</h3>
+            <p>Initialize and exercise the real-time AudioWorklet pipeline.</p>
+          </a>
+          <a class="page-card" href="./audio-worklet-validation.html">
+            <h3>AudioWorklet validation</h3>
+            <p>Validate runtime behavior with multiple AudioWorklet processor variants.</p>
+          </a>
+          <a class="page-card" href="./audio-worklet-benchmark.html">
+            <h3>AudioWorklet benchmark</h3>
+            <p>Measure real-time worklet processing performance.</p>
+          </a>
+          <a class="page-card" href="./browser-benchmark-litert.html">
+            <h3>LiteRT profile benchmark</h3>
+            <p>Profile the LiteRT-backed denoise runtime over repeated calls.</p>
+          </a>
+          <a class="page-card" href="./browser-benchmark-compare.html">
+            <h3>Runtime comparison</h3>
+            <p>Compare single-threaded and threaded runtime performance.</p>
+          </a>
+          <a class="page-card" href="./browser-benchmark-litert-manual.html">
+            <h3>Manual benchmark harness</h3>
+            <p>Expose benchmark helpers for ad hoc experiments in DevTools.</p>
+          </a>
+        </div>
       </section>
     </main>
   </body>
