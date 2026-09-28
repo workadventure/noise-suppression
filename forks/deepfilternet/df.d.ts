@@ -1,12 +1,6 @@
 /* tslint:disable */
 /* eslint-disable */
 /**
-* Get DeepFilterNet frame size in samples.
-* @param {number} st
-* @returns {number}
-*/
-export function df_get_frame_length(st: number): number;
-/**
 * Set DeepFilterNet attenuation limit.
 *
 * Args:
@@ -15,20 +9,6 @@ export function df_get_frame_length(st: number): number;
 * @param {number} lim_db
 */
 export function df_set_atten_lim(st: number, lim_db: number): void;
-/**
-* Create a DeepFilterNet Model
-*
-* Args:
-*     - path: File path to a DeepFilterNet tar.gz onnx model
-*     - atten_lim: Attenuation limit in dB.
-*
-* Returns:
-*     - DF state doing the full processing: stft, DNN noise reduction, istft.
-* @param {Uint8Array} model_bytes
-* @param {number} atten_lim
-* @returns {number}
-*/
-export function df_create(model_bytes: Uint8Array, atten_lim: number): number;
 /**
 * Set DeepFilterNet post filter beta. A beta of 0 disables the post filter.
 *
@@ -53,6 +33,26 @@ export function df_set_post_filter_beta(st: number, beta: number): void;
 * @returns {Float32Array}
 */
 export function df_process_frame(st: number, input: Float32Array): Float32Array;
+/**
+* Create a DeepFilterNet Model
+*
+* Args:
+*     - path: File path to a DeepFilterNet tar.gz onnx model
+*     - atten_lim: Attenuation limit in dB.
+*
+* Returns:
+*     - DF state doing the full processing: stft, DNN noise reduction, istft.
+* @param {Uint8Array} model_bytes
+* @param {number} atten_lim
+* @returns {number}
+*/
+export function df_create(model_bytes: Uint8Array, atten_lim: number): number;
+/**
+* Get DeepFilterNet frame size in samples.
+* @param {number} st
+* @returns {number}
+*/
+export function df_get_frame_length(st: number): number;
 /**
 */
 export class DFState {

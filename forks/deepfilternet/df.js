@@ -47,16 +47,6 @@ function addHeapObject(obj) {
     return idx;
 }
 /**
-* Get DeepFilterNet frame size in samples.
-* @param {number} st
-* @returns {number}
-*/
-export function df_get_frame_length(st) {
-    const ret = wasm.df_get_frame_length(st);
-    return ret >>> 0;
-}
-
-/**
 * Set DeepFilterNet attenuation limit.
 *
 * Args:
@@ -68,7 +58,55 @@ export function df_set_atten_lim(st, lim_db) {
     wasm.df_set_atten_lim(st, lim_db);
 }
 
+/**
+* Set DeepFilterNet post filter beta. A beta of 0 disables the post filter.
+*
+* Args:
+*     - beta: Post filter attenuation. Suitable range between 0.05 and 0;
+* @param {number} st
+* @param {number} beta
+*/
+export function df_set_post_filter_beta(st, beta) {
+    wasm.df_set_post_filter_beta(st, beta);
+}
+
+let cachedFloat32Memory0 = null;
+
+function getFloat32Memory0() {
+    if (cachedFloat32Memory0 === null || cachedFloat32Memory0.byteLength === 0) {
+        cachedFloat32Memory0 = new Float32Array(wasm.memory.buffer);
+    }
+    return cachedFloat32Memory0;
+}
+
 let WASM_VECTOR_LEN = 0;
+
+function passArrayF32ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 4, 4) >>> 0;
+    getFloat32Memory0().set(arg, ptr / 4);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+/**
+* Processes a chunk of samples.
+*
+* Args:
+*     - df_state: Created via df_create()
+*     - input: Input buffer of length df_get_frame_length()
+*     - output: Output buffer of length df_get_frame_length()
+*
+* Returns:
+*     - Local SNR of the current frame.
+* @param {number} st
+* @param {Float32Array} input
+* @returns {Float32Array}
+*/
+export function df_process_frame(st, input) {
+    const ptr0 = passArrayF32ToWasm0(input, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.df_process_frame(st, ptr0, len0);
+    return takeObject(ret);
+}
 
 function passArray8ToWasm0(arg, malloc) {
     const ptr = malloc(arg.length * 1, 1) >>> 0;
@@ -97,51 +135,13 @@ export function df_create(model_bytes, atten_lim) {
 }
 
 /**
-* Set DeepFilterNet post filter beta. A beta of 0 disables the post filter.
-*
-* Args:
-*     - beta: Post filter attenuation. Suitable range between 0.05 and 0;
+* Get DeepFilterNet frame size in samples.
 * @param {number} st
-* @param {number} beta
+* @returns {number}
 */
-export function df_set_post_filter_beta(st, beta) {
-    wasm.df_set_post_filter_beta(st, beta);
-}
-
-let cachedFloat32Memory0 = null;
-
-function getFloat32Memory0() {
-    if (cachedFloat32Memory0 === null || cachedFloat32Memory0.byteLength === 0) {
-        cachedFloat32Memory0 = new Float32Array(wasm.memory.buffer);
-    }
-    return cachedFloat32Memory0;
-}
-
-function passArrayF32ToWasm0(arg, malloc) {
-    const ptr = malloc(arg.length * 4, 4) >>> 0;
-    getFloat32Memory0().set(arg, ptr / 4);
-    WASM_VECTOR_LEN = arg.length;
-    return ptr;
-}
-/**
-* Processes a chunk of samples.
-*
-* Args:
-*     - df_state: Created via df_create()
-*     - input: Input buffer of length df_get_frame_length()
-*     - output: Output buffer of length df_get_frame_length()
-*
-* Returns:
-*     - Local SNR of the current frame.
-* @param {number} st
-* @param {Float32Array} input
-* @returns {Float32Array}
-*/
-export function df_process_frame(st, input) {
-    const ptr0 = passArrayF32ToWasm0(input, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.df_process_frame(st, ptr0, len0);
-    return takeObject(ret);
+export function df_get_frame_length(st) {
+    const ret = wasm.df_get_frame_length(st);
+    return ret >>> 0;
 }
 
 function handleError(f, args) {
