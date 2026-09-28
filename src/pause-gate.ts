@@ -14,6 +14,12 @@ export interface PauseGateOptions {
    * the model removes it (down to its limit), so it must not open the gate; speech goes through almost untouched.
    */
   maxSpeechAttenuationDb: number;
+  /**
+   * Consecutive speech frames needed to open the gate (default 1). A keystroke the model does not fully remove lasts
+   * one or two 10 ms frames, a syllable far longer: 2 or 3 keeps typing out of the gate. It must stay below
+   * `lookaheadFrames`, or the first syllable loses its attack.
+   */
+  minSpeechFrames?: number;
 }
 
 // The denoised frame lags its input by the model's delay (DeepFilterNet3: about 3 frames), so it is compared with
@@ -35,6 +41,7 @@ export class PauseGate {
   private readonly queue: Float32Array[] = [];
   private gainDb = 0;
   private hangover = 0;
+  private speechRun = 0;
   private floorDb: number | undefined;
   private readonly inputLevelsDb: number[] = [];
 
@@ -64,9 +71,13 @@ export class PauseGate {
     // microphone) is left out: a floor stuck at -120 dB would take seconds to climb back and hold the gate open.
     if (levelDb > DIGITAL_SILENCE_DB) {
       this.floorDb = Math.min(levelDb, (this.floorDb ?? levelDb) + 0.1);
-      if (levelDb > this.floorDb + speechAboveFloorDb && keptByDenoiser) {
+      const speech = levelDb > this.floorDb + speechAboveFloorDb && keptByDenoiser;
+      this.speechRun = speech ? this.speechRun + 1 : 0;
+      if (this.speechRun >= (this.options.minSpeechFrames ?? 1)) {
         this.hangover = lookaheadFrames + hangoverFrames;
       }
+    } else {
+      this.speechRun = 0;
     }
 
     this.queue.push(frame.slice());

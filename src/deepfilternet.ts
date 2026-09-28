@@ -11,6 +11,7 @@ import {
   type DeepFilterNetAudioWorkletProcessorOptions,
   type DeepFilterNetAudioWorkletReadyMessage,
 } from "./deepfilternet-shared";
+import { DEFAULT_POST_GAIN, type PostGainOptions } from "./post-gain";
 
 interface AudioWorkletCapableContext extends BaseAudioContext {
   readonly audioWorklet: AudioWorklet;
@@ -29,6 +30,21 @@ export interface DeepFilterNetAudioWorkletOptions {
   pauseAttenuationDb?: number;
   /** Pass the microphone through while loading, and after a failure (otherwise silence). Default true. */
   bypassUntilReady?: boolean;
+  /**
+   * Consecutive speech frames the pause gate needs before opening (default 1). 2 or 3 keeps brief keystrokes the
+   * model lets through from opening it; see `PauseGateOptions.minSpeechFrames`.
+   */
+  minSpeechFrames?: number;
+  /**
+   * Level the voice after the denoiser (true: `DEFAULT_POST_GAIN`). Meant to replace the browser's automatic gain
+   * control, which runs before the denoiser and raises the noise too: turn `autoGainControl` off on the microphone
+   * when enabling it. Default off.
+   */
+  postGain?: boolean | Partial<PostGainOptions>;
+  /** Share of real time the denoiser may use before `onOverload` fires (default 0.7; 0 disables the check). */
+  maxLoad?: number;
+  /** Called once when the machine cannot keep up (two 2 s windows over `maxLoad`); the node keeps running. */
+  onOverload?: (load: number) => void;
   readyTimeoutMs?: number;
   moduleUrl?: string;
   wasmUrl?: string;
@@ -44,6 +60,7 @@ export interface DeepFilterNetAudioWorkletHandle {
 const DEFAULT_SPEECH_ATTENUATION_DB = 25;
 const DEFAULT_PAUSE_ATTENUATION_DB = 45;
 const DEFAULT_READY_TIMEOUT_MS = 30000;
+const DEFAULT_MAX_LOAD = 0.7;
 
 const moduleLoadCache = new WeakMap<AudioWorkletCapableContext, Map<string, Promise<void>>>();
 const wasmModuleCache = new Map<string, Promise<WebAssembly.Module>>();
@@ -105,10 +122,11 @@ function createReadyPromise(
     }, timeoutMs);
 
     const handleMessage = (event: MessageEvent<DeepFilterNetAudioWorkletOutboundMessage>) => {
-      cleanup();
       if (event.data.type === "ready") {
+        cleanup();
         resolve(event.data);
-      } else {
+      } else if (event.data.type === "error") {
+        cleanup();
         reject(new Error(event.data.message));
       }
     };
@@ -172,7 +190,14 @@ export async function createDeepFilterNetAudioWorklet(
           }
         : undefined,
     bypassUntilReady: options.bypassUntilReady ?? true,
+    postGain: options.postGain
+      ? { ...DEFAULT_POST_GAIN, ...(options.postGain === true ? {} : options.postGain) }
+      : undefined,
+    maxLoad: options.maxLoad ?? DEFAULT_MAX_LOAD,
   };
+  if (processorOptions.pauseGate && options.minSpeechFrames !== undefined) {
+    processorOptions.pauseGate.minSpeechFrames = options.minSpeechFrames;
+  }
 
   const node = new AudioWorkletNode(context, DEEPFILTERNET_AUDIO_WORKLET_PROCESSOR_NAME, {
     channelCount: 1,
@@ -182,6 +207,15 @@ export async function createDeepFilterNetAudioWorklet(
     outputChannelCount: [1],
     processorOptions,
   });
+
+  const { onOverload } = options;
+  if (onOverload) {
+    node.port.addEventListener("message", (event: MessageEvent<DeepFilterNetAudioWorkletOutboundMessage>) => {
+      if (event.data.type === "overload") {
+        onOverload(event.data.load);
+      }
+    });
+  }
 
   return {
     node,
@@ -194,5 +228,6 @@ export async function createDeepFilterNetAudioWorklet(
   };
 }
 
-export { DEEPFILTERNET_SAMPLE_RATE };
+export { DEEPFILTERNET_SAMPLE_RATE, DEFAULT_POST_GAIN };
+export type { PostGainOptions };
 export type { DeepFilterNetAudioWorkletReadyMessage };
