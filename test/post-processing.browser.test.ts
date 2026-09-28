@@ -37,7 +37,7 @@ function levelDb(samples: Float32Array): number {
 
 /** Feeds a quiet floor, then one frame loud enough to count as speech every 15 frames: a click the model kept. */
 function lastFrameWithClicks(gate: PauseGate): Float32Array {
-  let last = new Float32Array(FRAME);
+  let last: Float32Array = new Float32Array(FRAME);
   for (let i = 0; i < 300; i++) {
     const frame = i % 15 === 0 ? tone(FRAME, 0.3) : seededNoise(FRAME, 0.001, i + 1);
     last = gate.process(frame, frame);
