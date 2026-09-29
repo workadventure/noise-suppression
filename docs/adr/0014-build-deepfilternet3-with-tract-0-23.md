@@ -27,17 +27,23 @@ quantum; faster inference is what could make it viable.
 
 ## Consequences
 
-Same machine, Node (V8), 7 alternated runs, per 10 ms frame and for `df_create` (which blocks the audio thread):
+Per 10 ms frame on 20 s of **real noisy speech** (VoiceBank+DEMAND), both stages always run (#20), same machine
+(Apple Silicon), Node (V8), 5 alternated runs; `df_create` (which blocks the audio thread) over 7 runs:
 
-| Build | mean | median | p95 | df_create |
+| Build | DeepFilterNet3 mean | p95 | DeepFilterNet3_ll mean | df_create (DFN3) |
 |---|---|---|---|---|
-| tract 0.21.4 | 0.406 ms | 0.380 ms | 0.519 ms | 387 ms |
-| tract 0.21.18 + SIMD (ADR 0013) | 0.303 ms | 0.279 ms | 0.401 ms | 328 ms |
-| tract 0.23.8 + SIMD | 0.158 ms | 0.125 ms | 0.304 ms | 207 ms |
+| tract 0.21.4 | 1.05 ms | 1.22 ms | 2.67 ms | 387 ms |
+| tract 0.21.18 + SIMD (ADR 0013) | 0.99 ms | 1.23 ms | 2.77 ms | 328 ms |
+| tract 0.23.8 + SIMD | **0.33 ms** | **0.45 ms** | **1.00 ms** | 207 ms |
+
+> **Correction (2026-09-29).** The first version of this ADR gave 0.406 / 0.303 / 0.158 ms, measured on white noise,
+> on which libDF's default stage skipping (fixed in #20) left most of the model unrun. The ratio for tract 0.23.8 held
+> up (~3× faster); the gain attributed to 0.21.18 did not.
 
 - Output is not bit-identical any more but within float rounding: max difference 1.9e-7 over 240,000 samples
   (129 dB below the signal). Delay unchanged (30 ms).
-- `DeepFilterNet3_ll` drops from 0.686 to 0.215 ms per frame (cheaper than today's DeepFilterNet3 on 0.21.4), making
-  it a candidate for a -20 ms option; its quality is still to be measured.
+- `DeepFilterNet3_ll` drops from 2.67 to 1.00 ms per frame, about what DeepFilterNet3 costs on tract 0.21.4 today,
+  making it a candidate for a -20 ms option. With both stages always run its quality matches DeepFilterNet3
+  (PESQ-WB 3.18 vs 3.22, DNSMOS OVRL 3.24 for both, see #20).
 - The wasm grows from 10.3 MB (ADR 0013) to 14.6 MB.
 - Measured on an Apple Silicon Mac only; x86 (SSE 128-bit) not measured.
