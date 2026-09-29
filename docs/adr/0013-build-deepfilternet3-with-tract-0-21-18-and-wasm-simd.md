@@ -1,6 +1,6 @@
 # ADR 0013: Build DeepFilterNet3 With tract 0.21.18 and Wasm SIMD
 
-- Status: Proposed
+- Status: Superseded by ADR 0014 (its speed-up did not hold on real speech)
 - Date: 2026-09-28
 
 ## Context
@@ -22,6 +22,11 @@ libDF's ndarray imports switched to `tract_core::ndarray` in `tract.rs` and `was
 `symbol_table`, and `RUSTFLAGS="-C target-feature=+simd128"`.
 
 ## Consequences
+
+> **Correction (2026-09-29).** The figures below were measured on white noise, on which libDF's default stage
+> skipping (see #20) left most of the model unrun. On 20 s of real noisy speech, with both stages always run, the
+> per-frame mean is 1.05 ms on tract 0.21.4 and 0.99 ms on tract 0.21.18 + SIMD: **no meaningful gain**. The SIMD
+> kernel exists but does not matter at this tract version; tract 0.23.8 (ADR 0014) is where the speed-up is.
 
 - Per frame, same machine, 7 alternated runs: mean 0.833 -> 0.639 ms (-23 %), median 0.743 -> 0.554 ms (-25 %),
   p95 1.207 -> 0.985 ms (-18 %). Of that, about -15 % is tract 0.21.18 itself and -12 % the SIMD kernel.
