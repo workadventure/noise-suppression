@@ -153,6 +153,43 @@ describe("DeepFilterNet3 AudioWorklet", () => {
     return (await decoder.decodeAudioData(bytes)).getChannelData(0);
   }
 
+  test("reports its measured load once through onLoadReport", async () => {
+    const seconds = 5;
+    const context = new OfflineAudioContext(1, seconds * DEEPFILTERNET_SAMPLE_RATE, DEEPFILTERNET_SAMPLE_RATE);
+    let resolveReport: (report: unknown) => void = () => {};
+    const reported = new Promise((resolve) => {
+      resolveReport = resolve;
+    });
+    const reports: unknown[] = [];
+    const handle = await createDeepFilterNetAudioWorklet(context, {
+      bypassUntilReady: false,
+      loadReportAfterMs: 4000,
+      onLoadReport: (report) => {
+        reports.push(report);
+        resolveReport(report);
+      },
+    });
+    await handle.ready;
+    const buffer = new AudioBuffer({
+      length: seconds * DEEPFILTERNET_SAMPLE_RATE,
+      sampleRate: DEEPFILTERNET_SAMPLE_RATE,
+      numberOfChannels: 1,
+    });
+    buffer.getChannelData(0).set(seededNoise(seconds * DEEPFILTERNET_SAMPLE_RATE, 0.05));
+    const source = new AudioBufferSourceNode(context, { buffer });
+    source.connect(handle.node).connect(context.destination);
+    source.start();
+    await context.startRendering();
+    const report = (await reported) as { windows: number; frames: number; medianLoad: number };
+    handle.dispose();
+
+    // 4 s = two 2 s windows of 200 frames
+    expect(reports).toHaveLength(1);
+    expect(report.windows).toBe(2);
+    expect(report.frames).toBe(400);
+    expect(report.medianLoad).toBeGreaterThanOrEqual(0);
+  });
+
   // Model (~40 ms) + pause gate lookahead (30 ms).
   const DELAY_SAMPLES = 3360;
 

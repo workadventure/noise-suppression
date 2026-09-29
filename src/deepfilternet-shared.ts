@@ -1,5 +1,6 @@
 import type { PauseGateOptions } from "./pause-gate";
 import type { PostGainOptions } from "./post-gain";
+import type { LoadReport } from "./load-monitor";
 
 export const DEEPFILTERNET_AUDIO_WORKLET_PROCESSOR_NAME = "workadventure-deepfilternet";
 
@@ -20,6 +21,8 @@ export interface DeepFilterNetAudioWorkletProcessorOptions {
    * 0 disables the check.
    */
   maxLoad: number;
+  /** Send one `load-report` after this much processed audio; 0 disables it. */
+  loadReportAfterMs: number;
 }
 
 export interface DeepFilterNetAudioWorkletReadyMessage {
@@ -42,6 +45,11 @@ export interface DeepFilterNetAudioWorkletOverloadMessage {
   load: number;
 }
 
+/** The processor's measured cost, sent once after `loadReportAfterMs` of processed audio. */
+export interface DeepFilterNetAudioWorkletLoadReportMessage extends LoadReport {
+  type: "load-report";
+}
+
 export interface DeepFilterNetAudioWorkletDisposeMessage {
   type: "dispose";
 }
@@ -49,4 +57,5 @@ export interface DeepFilterNetAudioWorkletDisposeMessage {
 export type DeepFilterNetAudioWorkletOutboundMessage =
   | DeepFilterNetAudioWorkletReadyMessage
   | DeepFilterNetAudioWorkletErrorMessage
-  | DeepFilterNetAudioWorkletOverloadMessage;
+  | DeepFilterNetAudioWorkletOverloadMessage
+  | DeepFilterNetAudioWorkletLoadReportMessage;

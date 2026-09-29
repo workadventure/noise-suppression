@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { LoadMonitor } from "../src/load-monitor";
+import { LoadMonitor, LoadSampler } from "../src/load-monitor";
 import { PauseGate, type PauseGateOptions } from "../src/pause-gate";
 import { DEFAULT_POST_GAIN, PostGain } from "../src/post-gain";
 
@@ -134,5 +134,24 @@ describe("LoadMonitor", () => {
     const monitor = new LoadMonitor(10, frameMs, 0.7);
     const reports = Array.from({ length: 40 }, () => monitor.record(8)).filter((report) => report !== undefined);
     expect(reports).toEqual([0.8]);
+  });
+});
+
+describe("LoadSampler", () => {
+  test("reports once, after the requested windows, with window percentiles and slow frames", () => {
+    // 10 frames of 10 ms per window, report after 4 windows; window loads 0.1, 0.2, 0.3, 0.4
+    const sampler = new LoadSampler(10, 10, 4);
+    const frameTimes = [1, 2, 3, 4].flatMap((ms) => Array(10).fill(ms) as number[]);
+    const reports = frameTimes.map((ms) => sampler.record(ms)).filter((report) => report !== undefined);
+
+    expect(reports).toHaveLength(1);
+    const [report] = reports;
+    expect(report!.windows).toBe(4);
+    expect(report!.medianLoad).toBeCloseTo(0.3);
+    expect(report!.p95Load).toBeCloseTo(0.4);
+    expect(report!.maxLoad).toBeCloseTo(0.4);
+    expect(report!.slowFrames).toBe(20); // the 3 ms and 4 ms frames
+    expect(report!.frames).toBe(40);
+    expect(Array.from({ length: 50 }, () => sampler.record(9)).every((r) => r === undefined)).toBe(true);
   });
 });

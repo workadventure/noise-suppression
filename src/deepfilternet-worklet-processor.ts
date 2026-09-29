@@ -8,13 +8,14 @@ import {
 import { Float32RingBuffer } from "./float32-ring-buffer";
 import { PauseGate } from "./pause-gate";
 import { PostGain } from "./post-gain";
-import { LoadMonitor } from "./load-monitor";
+import { LoadMonitor, LoadSampler } from "./load-monitor";
 import {
   DEEPFILTERNET_AUDIO_WORKLET_PROCESSOR_NAME,
   DEEPFILTERNET_SAMPLE_RATE,
   type DeepFilterNetAudioWorkletDisposeMessage,
   type DeepFilterNetAudioWorkletErrorMessage,
   type DeepFilterNetAudioWorkletOverloadMessage,
+  type DeepFilterNetAudioWorkletLoadReportMessage,
   type DeepFilterNetAudioWorkletProcessorOptions,
   type DeepFilterNetAudioWorkletReadyMessage,
 } from "./deepfilternet-shared";
@@ -35,6 +36,7 @@ class DeepFilterNetProcessor extends AudioWorkletProcessor {
   private pauseGate: PauseGate | undefined;
   private postGain: PostGain | undefined;
   private loadMonitor: LoadMonitor | undefined;
+  private loadSampler: LoadSampler | undefined;
   private readonly inputRing = new Float32RingBuffer(RING_BUFFER_CAPACITY);
   private readonly outputRing = new Float32RingBuffer(RING_BUFFER_CAPACITY);
 
@@ -67,6 +69,13 @@ class DeepFilterNetProcessor extends AudioWorkletProcessor {
       if (processorOptions.maxLoad > 0) {
         // One window = 200 frames = 2 s of audio.
         this.loadMonitor = new LoadMonitor(200, (this.frameSamples / sampleRate) * 1000, processorOptions.maxLoad);
+      }
+      if (processorOptions.loadReportAfterMs > 0) {
+        this.loadSampler = new LoadSampler(
+          200,
+          (this.frameSamples / sampleRate) * 1000,
+          Math.max(1, Math.round(processorOptions.loadReportAfterMs / 2000))
+        );
       }
       const ready: DeepFilterNetAudioWorkletReadyMessage = { type: "ready", frameSamples: this.frameSamples };
       this.port.postMessage(ready);
@@ -103,7 +112,13 @@ class DeepFilterNetProcessor extends AudioWorkletProcessor {
         const denoised = df_process_frame(this.state, this.frame);
         const gated = this.pauseGate ? this.pauseGate.process(denoised, this.frame) : denoised;
         this.outputRing.push(this.postGain ? this.postGain.process(gated) : gated);
-        const overloadLoad = this.loadMonitor?.record(now() - startedAt);
+        const elapsedMs = now() - startedAt;
+        const overloadLoad = this.loadMonitor?.record(elapsedMs);
+        const loadReport = this.loadSampler?.record(elapsedMs);
+        if (loadReport) {
+          const message: DeepFilterNetAudioWorkletLoadReportMessage = { type: "load-report", ...loadReport };
+          this.port.postMessage(message);
+        }
         if (overloadLoad !== undefined) {
           const overload: DeepFilterNetAudioWorkletOverloadMessage = { type: "overload", load: overloadLoad };
           this.port.postMessage(overload);

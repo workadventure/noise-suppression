@@ -12,6 +12,7 @@ import {
   type DeepFilterNetAudioWorkletReadyMessage,
 } from "./deepfilternet-shared";
 import { DEFAULT_POST_GAIN, type PostGainOptions } from "./post-gain";
+import type { LoadReport } from "./load-monitor";
 
 interface AudioWorkletCapableContext extends BaseAudioContext {
   readonly audioWorklet: AudioWorklet;
@@ -52,6 +53,12 @@ export interface DeepFilterNetAudioWorkletOptions {
   maxLoad?: number;
   /** Called once when the machine cannot keep up (two 2 s windows over `maxLoad`); the node keeps running. */
   onOverload?: (load: number) => void;
+  /**
+   * Called once with the processor's measured cost after `loadReportAfterMs` (default 60 s) of processed audio: per
+   * 2 s window load (median, p95, max) and slow frames. For telemetry; not sent when absent.
+   */
+  onLoadReport?: (report: LoadReport) => void;
+  loadReportAfterMs?: number;
   readyTimeoutMs?: number;
   moduleUrl?: string;
   wasmUrl?: string;
@@ -68,6 +75,7 @@ const DEFAULT_SPEECH_ATTENUATION_DB = 25;
 const DEFAULT_PAUSE_ATTENUATION_DB = 45;
 const DEFAULT_READY_TIMEOUT_MS = 30000;
 const DEFAULT_MAX_LOAD = 0.7;
+const DEFAULT_LOAD_REPORT_AFTER_MS = 60_000;
 
 const moduleLoadCache = new WeakMap<AudioWorkletCapableContext, Map<string, Promise<void>>>();
 const wasmModuleCache = new Map<string, Promise<WebAssembly.Module>>();
@@ -201,6 +209,7 @@ export async function createDeepFilterNetAudioWorklet(
       ? { ...DEFAULT_POST_GAIN, ...(options.postGain === true ? {} : options.postGain) }
       : undefined,
     maxLoad: options.maxLoad ?? DEFAULT_MAX_LOAD,
+    loadReportAfterMs: options.onLoadReport ? (options.loadReportAfterMs ?? DEFAULT_LOAD_REPORT_AFTER_MS) : 0,
   };
   if (processorOptions.pauseGate && options.minSpeechFrames !== undefined) {
     processorOptions.pauseGate.minSpeechFrames = options.minSpeechFrames;
@@ -215,11 +224,14 @@ export async function createDeepFilterNetAudioWorklet(
     processorOptions,
   });
 
-  const { onOverload } = options;
-  if (onOverload) {
+  const { onOverload, onLoadReport } = options;
+  if (onOverload || onLoadReport) {
     node.port.addEventListener("message", (event: MessageEvent<DeepFilterNetAudioWorkletOutboundMessage>) => {
       if (event.data.type === "overload") {
-        onOverload(event.data.load);
+        onOverload?.(event.data.load);
+      } else if (event.data.type === "load-report") {
+        const { type: _type, ...report } = event.data;
+        onLoadReport?.(report);
       }
     });
   }
@@ -237,4 +249,5 @@ export async function createDeepFilterNetAudioWorklet(
 
 export { DEEPFILTERNET_SAMPLE_RATE, DEFAULT_POST_GAIN };
 export type { PostGainOptions };
+export type { LoadReport } from "./load-monitor";
 export type { DeepFilterNetAudioWorkletReadyMessage };
