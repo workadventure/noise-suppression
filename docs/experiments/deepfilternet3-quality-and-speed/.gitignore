@@ -1,0 +1,6 @@
+.venv/
+vbd/
+dnsmos/
+work/
+results_*.json
+speech20s.f32
