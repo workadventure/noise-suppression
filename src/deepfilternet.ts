@@ -36,6 +36,13 @@ export interface DeepFilterNetAudioWorkletOptions {
    */
   minSpeechFrames?: number;
   /**
+   * Frames the pause gate delays the output by, so it is open when a word starts (default 3 = 30 ms). The whole
+   * chain then adds 30 ms (model) + 10.7 ms (reframing) + this: 1 cuts 20 ms of voice delay for a sharper attack.
+   * Keep it above `minSpeechFrames`, or the first syllable of a word loses its attack. Without a gate
+   * (`pauseAttenuationDb` <= `speechAttenuationDb`) there is no such delay at all.
+   */
+  pauseGateLookaheadFrames?: number;
+  /**
    * Level the voice after the denoiser (true: `DEFAULT_POST_GAIN`). Meant to replace the browser's automatic gain
    * control, which runs before the denoiser and raises the noise too: turn `autoGainControl` off on the microphone
    * when enabling it. Default off.
@@ -181,7 +188,7 @@ export async function createDeepFilterNetAudioWorklet(
       pauseAttenuationDb > speechAttenuationDb
         ? {
             extraAttenuationDb: pauseAttenuationDb - speechAttenuationDb,
-            lookaheadFrames: 3, // 30 ms
+            lookaheadFrames: options.pauseGateLookaheadFrames ?? 3, // 30 ms
             hangoverFrames: 10, // 100 ms
             releaseDbPerFrame: 0.6, // 60 dB/s
             speechAboveFloorDb: 10,

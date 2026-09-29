@@ -74,6 +74,22 @@ describe("PauseGate minSpeechFrames", () => {
   });
 });
 
+describe("PauseGate lookaheadFrames", () => {
+  test("with a 1-frame lookahead, the voice is delayed by one frame and comes out at full level", () => {
+    const gate = new PauseGate({ ...GATE, lookaheadFrames: 1 });
+    for (let i = 0; i < 200; i++) {
+      const floor = seededNoise(FRAME, 0.001, i + 1);
+      gate.process(floor, floor);
+    }
+    const outputs = Array.from({ length: 3 }, (_, i) => {
+      const frame = tone(FRAME, 0.5, i * FRAME);
+      return gate.process(frame, frame);
+    });
+    // outputs[0] is the last pause frame (ramping open); outputs[1] is the first speech frame, one frame late
+    expect(levelDb(outputs[1]!)).toBeCloseTo(levelDb(tone(FRAME, 0.5, 0)), 1);
+  });
+});
+
 describe("PostGain", () => {
   test("raises quiet speech towards the target, slowly", () => {
     const postGain = new PostGain();
