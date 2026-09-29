@@ -36,4 +36,5 @@ declare module "virtual:deepfilternet-audio-worklet-module-url" {
 declare module "virtual:deepfilternet-default-assets" {
   export const defaultDeepFilterNetWasmUrl: string;
   export const defaultDeepFilterNetModelUrl: string;
+  export const defaultDeepFilterNetLowLatencyModelUrl: string;
 }

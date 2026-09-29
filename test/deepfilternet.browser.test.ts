@@ -55,6 +55,22 @@ function keystrokes(length: number, rate: number, seed = 42): Float32Array {
   return out;
 }
 
+function bestLag(reference: Float32Array, delayed: Float32Array, maxLag: number): number {
+  let best = 0;
+  let bestScore = -Infinity;
+  for (let lag = 0; lag <= maxLag; lag += 1) {
+    let score = 0;
+    for (let i = 0; i + lag < delayed.length && i < reference.length; i += 1) {
+      score += reference[i]! * delayed[i + lag]!;
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      best = lag;
+    }
+  }
+  return best;
+}
+
 function levelDb(samples: Float32Array): number {
   let energy = 0;
   for (const sample of samples) {
@@ -129,9 +145,12 @@ describe("DeepFilterNet3 AudioWorklet", () => {
     await expect(createDeepFilterNetAudioWorklet(context)).rejects.toThrow("48000 Hz");
   });
 
-  async function denoise(input: Float32Array): Promise<{ output: Float32Array; frameSamples: number }> {
+  async function denoise(
+    input: Float32Array,
+    model: "standard" | "low-latency" = "standard",
+  ): Promise<{ output: Float32Array; frameSamples: number }> {
     const context = new OfflineAudioContext(1, input.length, DEEPFILTERNET_SAMPLE_RATE);
-    const handle = await createDeepFilterNetAudioWorklet(context, { bypassUntilReady: false });
+    const handle = await createDeepFilterNetAudioWorklet(context, { bypassUntilReady: false, model });
     const { frameSamples } = await handle.ready;
     const buffer = new AudioBuffer({
       length: input.length,
@@ -200,6 +219,17 @@ describe("DeepFilterNet3 AudioWorklet", () => {
     expect(frameSamples).toBe(480);
     expect(output.every(Number.isFinite)).toBe(true);
     const voiceOut = output.subarray(DELAY_SAMPLES);
+    expect(levelDb(voiceOut)).toBeCloseTo(levelDb(voice.subarray(0, voiceOut.length)), 0);
+  });
+
+  test("the low-latency model keeps clean speech, 20 ms earlier", async () => {
+    const voice = await loadVoice();
+    const standard = await denoise(voice);
+    const lowLatency = await denoise(voice, "low-latency");
+
+    // Same windowing and gate, no model lookahead: 2 frames (960 samples) earlier.
+    expect(bestLag(voice, lowLatency.output, 4000)).toBe(bestLag(voice, standard.output, 4000) - 960);
+    const voiceOut = lowLatency.output.subarray(DELAY_SAMPLES - 960);
     expect(levelDb(voiceOut)).toBeCloseTo(levelDb(voice.subarray(0, voiceOut.length)), 0);
   });
 

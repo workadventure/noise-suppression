@@ -47,6 +47,12 @@ const deepFilterNetAssets: DevAsset[] = [
     filePath: distPath("./assets/deepfilternet/DeepFilterNet3_onnx.tar.gz"),
     contentType: "application/gzip",
   },
+  {
+    expression: urlExpression("assets/deepfilternet/DeepFilterNet3_ll_onnx.tar.gz"),
+    devUrl: `${DEEPFILTERNET_DEV_PREFIX}DeepFilterNet3_ll_onnx.tar.gz`,
+    filePath: distPath("./assets/deepfilternet/DeepFilterNet3_ll_onnx.tar.gz"),
+    contentType: "application/gzip",
+  },
 ];
 
 export function noiseSuppressionAudioWorkletVitePlugin(

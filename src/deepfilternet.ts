@@ -1,5 +1,6 @@
 import deepFilterNetWorkletModuleUrl from "virtual:deepfilternet-audio-worklet-module-url";
 import {
+  defaultDeepFilterNetLowLatencyModelUrl,
   defaultDeepFilterNetModelUrl,
   defaultDeepFilterNetWasmUrl,
 } from "virtual:deepfilternet-default-assets";
@@ -62,6 +63,11 @@ export interface DeepFilterNetAudioWorkletOptions {
   readyTimeoutMs?: number;
   moduleUrl?: string;
   wasmUrl?: string;
+  /**
+   * "low-latency" loads DeepFilterNet3_ll: no lookahead, so 10 ms of model delay instead of 30 ms, for about 3x the
+   * compute per frame and a 36 MB model (8 MB for "standard"). Experimental. Ignored when `modelUrl` is set.
+   */
+  model?: "standard" | "low-latency";
   modelUrl?: string;
 }
 
@@ -177,7 +183,9 @@ export async function createDeepFilterNetAudioWorklet(
 
   const moduleUrl = options.moduleUrl ?? deepFilterNetWorkletModuleUrl;
   const wasmUrl = options.wasmUrl ?? defaultDeepFilterNetWasmUrl;
-  const modelUrl = options.modelUrl ?? defaultDeepFilterNetModelUrl;
+  const modelUrl =
+    options.modelUrl ??
+    (options.model === "low-latency" ? defaultDeepFilterNetLowLatencyModelUrl : defaultDeepFilterNetModelUrl);
   const speechAttenuationDb = options.speechAttenuationDb ?? DEFAULT_SPEECH_ATTENUATION_DB;
   const pauseAttenuationDb = options.pauseAttenuationDb ?? DEFAULT_PAUSE_ATTENUATION_DB;
 

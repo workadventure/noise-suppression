@@ -307,6 +307,7 @@ function deepFilterNetAssetsPlugin() {
         return `
 export const defaultDeepFilterNetWasmUrl = "/forks/deepfilternet/df_bg.wasm";
 export const defaultDeepFilterNetModelUrl = "/model/DeepFilterNet3_onnx.tar.gz";
+export const defaultDeepFilterNetLowLatencyModelUrl = "/model/DeepFilterNet3_ll_onnx.tar.gz";
 `;
       }
 
@@ -320,10 +321,16 @@ export const defaultDeepFilterNetModelUrl = "/model/DeepFilterNet3_onnx.tar.gz";
         fileName: "assets/deepfilternet/DeepFilterNet3_onnx.tar.gz",
         source: fs.readFileSync(path.resolve(rootDir, "model/DeepFilterNet3_onnx.tar.gz")),
       });
+      const lowLatencyModelReference = this.emitFile({
+        type: "asset",
+        fileName: "assets/deepfilternet/DeepFilterNet3_ll_onnx.tar.gz",
+        source: fs.readFileSync(path.resolve(rootDir, "model/DeepFilterNet3_ll_onnx.tar.gz")),
+      });
 
       return `
 export const defaultDeepFilterNetWasmUrl = import.meta.ROLLUP_FILE_URL_${wasmReference};
 export const defaultDeepFilterNetModelUrl = import.meta.ROLLUP_FILE_URL_${modelReference};
+export const defaultDeepFilterNetLowLatencyModelUrl = import.meta.ROLLUP_FILE_URL_${lowLatencyModelReference};
 `;
     },
   };
