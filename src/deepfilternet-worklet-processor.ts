@@ -56,7 +56,7 @@ class DeepFilterNetProcessor extends AudioWorkletProcessor {
           `DeepFilterNet3 needs a ${DEEPFILTERNET_SAMPLE_RATE} Hz AudioContext, got ${sampleRate} Hz.`
         );
       }
-      initSync(processorOptions.wasmModule);
+      initSync({ module: processorOptions.wasmModule });
       this.state = df_create(new Uint8Array(processorOptions.modelBytes), processorOptions.speechAttenuationDb);
       this.frameSamples = df_get_frame_length(this.state);
       this.frame = new Float32Array(this.frameSamples);

@@ -1,0 +1,297 @@
+diff --git a/libDF/Cargo.toml b/libDF/Cargo.toml
+index c0f3271..292eb5e 100644
+--- a/libDF/Cargo.toml
++++ b/libDF/Cargo.toml
+@@ -84,10 +84,10 @@ nightly-features = []
+ capi = ["tract", "default-model", "dep:ndarray", "logging"]
+ wasm = [
+   "tract",
+-  "default-model",
+   "dep:ndarray",
+   "dep:wasm-bindgen",
+   "dep:getrandom",
++  "dep:getrandom04",
+   "dep:console_error_panic_hook",
+   "dep:js-sys",
+ ]
+@@ -120,14 +120,16 @@ claxon = { version = "^0.4", optional = true }
+ env_logger = { version = "0.11", optional = true }
+ clap = { version = "4.0", optional = true, features = ["derive"] }
+ rust-ini = { version = "^0.21", optional = true }
+-tract-core = { version = "^0.21.4", optional = true }
+-tract-onnx = { version = "^0.21.4", optional = true }
+-tract-pulse = { version = "^0.21.4", optional = true }
+-tract-hir = { version = "^0.21.4", optional = true }
++tract-core = { version = "=0.23.8", optional = true }
++tract-onnx = { version = "=0.23.8", optional = true }
++tract-pulse = { version = "=0.23.8", optional = true }
++tract-hir = { version = "=0.23.8", optional = true }
+ flate2 = { version = "1.0.24", optional = true }
+ tar = { version = "0.4.38", optional = true }
+ wasm-bindgen = { version = "0.2.87", optional = true }
+ getrandom = { version = "0.2", features = ["js"], optional = true }
++# tract 0.23 pulls rand 0.10 -> getrandom 0.4, whose browser backend must be enabled explicitly
++getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"], optional = true }
+ console_error_panic_hook = { version = "0.1.1", optional = true }
+ js-sys = { version = "0.3", optional = true }
+ 
+diff --git a/libDF/src/tract.rs b/libDF/src/tract.rs
+index b39a987..c582472 100644
+--- a/libDF/src/tract.rs
++++ b/libDF/src/tract.rs
+@@ -7,7 +7,8 @@ use std::time::Instant;
+ use anyhow::{bail, Context, Result};
+ use flate2::read::GzDecoder;
+ use ini::Ini;
+-use ndarray::{prelude::*, Axis};
++use tract_core::ndarray::{prelude::*, Axis};
++use tract_core::internal::SimpleState;
+ use tar::Archive;
+ use tract_core::internal::tract_itertools::izip;
+ use tract_core::internal::tract_smallvec::alloc::collections::VecDeque;
+@@ -192,7 +193,7 @@ impl Default for RuntimeParams {
+     }
+ }
+ 
+-pub type TractModel = TypedSimpleState<TypedModel, TypedSimplePlan<TypedModel>>;
++pub type TractModel = TypedSimpleState;
+ 
+ #[derive(Clone)]
+ pub struct DfTract {
+@@ -257,9 +258,9 @@ impl DfTract {
+         )?;
+         let df_dec =
+             init_df_decoder_from_read(&mut Cursor::new(dfp.df_dec), model_cfg, df_cfg, ch)?;
+-        let enc = SimpleState::new(enc.into_runnable()?)?;
+-        let erb_dec = SimpleState::new(erb_dec.into_runnable()?)?;
+-        let df_dec = SimpleState::new(df_dec.into_runnable()?)?;
++        let enc = SimpleState::new(&enc.into_runnable()?)?;
++        let erb_dec = SimpleState::new(&erb_dec.into_runnable()?)?;
++        let df_dec = SimpleState::new(&df_dec.into_runnable()?)?;
+         #[cfg(feature = "timings")]
+         let t1 = Instant::now();
+ 
+@@ -439,7 +440,7 @@ impl DfTract {
+     ///     - gains: Gain estimates of shape `[n_ch, 1, 1, n_erb]`.
+     ///     - coefs: Real-valued DF coefficients estimates of shape `[n_ch, 1, 1, n_erb, 2]`.
+     pub fn process_raw(&mut self) -> Result<(f32, Option<Tensor>, Option<Tensor>)> {
+-        let spec = self.spec_buf.to_array_view()?;
++        let spec = self.spec_buf.to_plain_array_view()?;
+         let ch = spec.len_of(Axis(0));
+ 
+         for (nsy_ch, mut erb_ch, mut cplx_ch, state) in izip!(
+@@ -462,7 +463,8 @@ impl DfTract {
+             TValue::from(self.cplx_buf.clone().into_tensor().permute_axes(&[0, 3, 1, 2])?)
+         ))?;
+ 
+-        let &lsnr = enc_emb.pop().unwrap().to_scalar::<f32>()?;
++        let lsnr_value = enc_emb.pop().unwrap();
++        let lsnr = *lsnr_value.try_as_plain_ram()?.to_scalar::<f32>()?;
+         let c0 = enc_emb.pop().unwrap();
+         let emb = enc_emb.pop().unwrap();
+ 
+@@ -532,7 +534,7 @@ impl DfTract {
+         self.rolling_spec_buf_x.pop_front();
+         for (ns_ch, mut rbuf, state) in izip!(
+             noisy.axis_iter(Axis(0)),
+-            self.spec_buf.to_array_view_mut()?.axis_iter_mut(Axis(0)),
++            self.spec_buf.to_plain_array_view_mut()?.axis_iter_mut(Axis(0)),
+             self.df_states.iter_mut(),
+         ) {
+             let spec = as_slice_mut_complex(rbuf.as_slice_mut().unwrap());
+@@ -552,9 +554,9 @@ impl DfTract {
+             .rolling_spec_buf_y
+             .get_mut(self.df_order - 1)
+             .unwrap()
+-            .to_array_view_mut()?;
++            .to_plain_array_view_mut()?;
+         if let Some(gains) = gains {
+-            let mut gains = gains.into_array()?;
++            let mut gains = gains.into_plain_array()?;
+             if gains.shape()[0] < noisy.shape()[0] {
+                 // Mask was reduced to single channel
+                 let gain_slc = gains.as_slice_mut().unwrap();
+@@ -600,14 +602,14 @@ impl DfTract {
+             self.rolling_spec_buf_x
+                 .get(self.lookahead.max(self.df_order) - self.lookahead - 1)
+                 .unwrap()
+-                .to_array_view::<f32>()
++                .to_plain_array_view::<f32>()
+                 .unwrap(),
+             &[self.ch, self.n_freqs],
+         )
+         .into_dimensionality::<Ix2>()
+         .unwrap();
+         let mut spec_enh = as_arrayview_mut_complex(
+-            self.spec_buf.to_array_view_mut::<f32>().unwrap(),
++            self.spec_buf.to_plain_array_view_mut::<f32>().unwrap(),
+             &[self.ch, self.n_freqs],
+         )
+         .into_dimensionality::<Ix2>()
+@@ -673,7 +675,7 @@ impl DfTract {
+ 
+     pub fn set_spec_buffer(&mut self, spec: ArrayView2<f32>) -> Result<()> {
+         debug_assert_eq!(self.spec_buf.shape(), spec.shape());
+-        let mut buf = self.spec_buf.to_array_view_mut()?.into_shape([self.ch, self.n_freqs])?;
++        let mut buf = self.spec_buf.to_plain_array_view_mut()?.into_shape([self.ch, self.n_freqs])?;
+         for (i_ch, mut b_ch) in spec.outer_iter().zip(buf.outer_iter_mut()) {
+             for (&i, b) in i_ch.iter().zip(b_ch.iter_mut()) {
+                 *b = i
+@@ -687,7 +689,7 @@ impl DfTract {
+             self.rolling_spec_buf_x
+                 .get(self.lookahead.max(self.df_order) - self.lookahead - 1)
+                 .unwrap()
+-                .to_array_view::<f32>()
++                .to_plain_array_view::<f32>()
+                 .unwrap(),
+             &[self.ch, self.n_freqs],
+         )
+@@ -696,7 +698,7 @@ impl DfTract {
+     }
+     pub fn get_spec_enh(&self) -> ArrayView2<Complex32> {
+         as_arrayview_complex(
+-            self.spec_buf.to_array_view::<f32>().unwrap(),
++            self.spec_buf.to_plain_array_view::<f32>().unwrap(),
+             &[self.ch, self.n_freqs],
+         )
+         .into_dimensionality::<Ix2>()
+@@ -704,7 +706,7 @@ impl DfTract {
+     }
+     pub fn get_mut_spec_enh(&mut self) -> ArrayViewMut2<Complex32> {
+         as_arrayview_mut_complex(
+-            self.spec_buf.to_array_view_mut::<f32>().unwrap(),
++            self.spec_buf.to_plain_array_view_mut::<f32>().unwrap(),
+             &[self.ch, self.n_freqs],
+         )
+         .into_dimensionality::<Ix2>()
+@@ -738,16 +740,16 @@ fn df(
+     debug_assert_eq!(ch, spec_out.shape()[0]);
+     debug_assert!(spec.len() >= df_order);
+     let mut o_f: ArrayViewMut2<Complex32> =
+-        as_arrayview_mut_complex(spec_out.to_array_view_mut::<f32>()?, &[ch, n_freqs])
++        as_arrayview_mut_complex(spec_out.to_plain_array_view_mut::<f32>()?, &[ch, n_freqs])
+             .into_dimensionality()?;
+     // Zero relevant frequency bins of output
+     o_f.slice_mut(s![.., ..nb_df]).fill(Complex32::default());
+     let coefs_arr: ArrayView3<Complex32> =
+-        as_arrayview_complex(coefs.to_array_view::<f32>()?, &[ch, nb_df, df_order])
++        as_arrayview_complex(coefs.to_plain_array_view::<f32>()?, &[ch, nb_df, df_order])
+             .into_dimensionality()?;
+     // Transform spec to an complex array and iterate over time frames of spec and coefs
+     let spec_iter = spec.iter().map(|s| {
+-        as_arrayview_complex(s.to_array_view::<f32>().unwrap(), &[ch, n_freqs])
++        as_arrayview_complex(s.to_plain_array_view::<f32>().unwrap(), &[ch, n_freqs])
+             .into_dimensionality::<Ix2>()
+             .unwrap()
+     });
+@@ -772,7 +774,7 @@ fn init_encoder_impl(
+     n_ch: usize,
+ ) -> Result<TypedModel> {
+     log::debug!("Start init encoder.");
+-    let s = m.symbol_table.sym("S");
++    let s = m.symbols.sym("S");
+ 
+     let nb_erb = df_cfg.get("nb_erb").unwrap().parse::<usize>()?;
+     let nb_df = df_cfg.get("nb_df").unwrap().parse::<usize>()?;
+@@ -787,8 +789,8 @@ fn init_encoder_impl(
+     m = m
+         .with_input_fact(0, feat_erb)?
+         .with_input_fact(1, feat_spec)?
+-        .with_input_names(["feat_erb", "feat_spec"])?
+-        .with_output_names(["e0", "e1", "e2", "e3", "emb", "c0", "lsnr"])?;
++        .with_input_names(["feat_erb", "feat_spec"])?;
++    select_output_names(&mut m, &["e0", "e1", "e2", "e3", "emb", "c0", "lsnr"])?;
+ 
+     m.analyse(true)?;
+     let mut m = m.into_typed()?;
+@@ -821,7 +823,7 @@ fn init_erb_decoder_impl(
+     mask_reduction: Option<ReduceMask>,
+ ) -> Result<TypedModel> {
+     log::debug!("Start init ERB decoder.");
+-    let s = m.symbol_table.sym("S");
++    let s = m.symbols.sym("S");
+ 
+     let nb_erb = df_cfg.get("nb_erb").unwrap().parse::<usize>()?;
+     let layer_width = net_cfg.get("conv_ch").unwrap().parse::<usize>()?;
+@@ -900,7 +902,7 @@ fn init_erb_decoder_impl(
+             _ => (),
+         }
+     }
+-    m = m.with_output_names(&[output_name])?;
++    select_typed_output_names(&mut m, &[&output_name])?;
+ 
+     let m = m.into_optimized()?;
+ 
+@@ -934,7 +936,7 @@ fn init_df_decoder_impl(
+     n_ch: usize,
+ ) -> Result<TypedModel> {
+     log::debug!("Start init DF decoder.");
+-    let s = m.symbol_table.sym("S");
++    let s = m.symbols.sym("S");
+ 
+     let nb_erb = df_cfg.get("nb_erb").unwrap().parse::<usize>()?;
+     let nb_df = df_cfg.get("nb_df").unwrap().parse::<usize>()?;
+@@ -956,7 +958,8 @@ fn init_df_decoder_impl(
+         .with_input_fact(0, emb)?
+         .with_input_fact(1, c0)?
+         .with_input_names(["emb", "c0"])?
+-        .with_output_names(["coefs"])?;
++;
++    select_output_names(&mut m, &["coefs"])?;
+ 
+     m.analyse(true)?;
+     let mut m = m.into_typed()?;
+@@ -1069,12 +1072,36 @@ pub fn as_arrayview_mut_complex<'a>(
+ pub fn tvalue_to_array_view_mut(x: &mut TValue) -> ArrayViewMutD<f32> {
+     unsafe {
+         match x {
+-            TValue::Var(x) => {
+-                ArrayViewMutD::from_shape_ptr(x.shape(), x.as_ptr_unchecked::<f32>() as *mut f32)
+-            }
+-            TValue::Const(x) => {
+-                ArrayViewMutD::from_shape_ptr(x.shape(), x.as_ptr_unchecked::<f32>() as *mut f32)
++            // tract 0.23: TValue wraps an Arc<Tensor> instead of a Var/Const enum
++            x => {
++                let t = x.as_arc_tensor().expect("TValue always holds a tensor");
++                ArrayViewMutD::from_shape_ptr(t.shape(), t.as_ptr_unchecked::<f32>() as *mut f32)
+             }
+         }
+     }
+ }
++
++
++/// tract 0.23 dropped `with_output_names`: select the outputs by their ONNX tensor (outlet) names.
++macro_rules! select_outputs_by_name {
++    ($m:expr, $names:expr) => {{
++        let outlets = $names
++            .iter()
++            .map(|name: &&str| {
++                $m.find_outlet_label(name)
++                    .or_else(|| $m.node_by_name(name).ok().map(|node| OutletId::new(node.id, 0)))
++                    .ok_or_else(|| anyhow::anyhow!("no output named {name}"))
++            })
++            .collect::<Result<Vec<_>>>()?;
++        $m.select_output_outlets(&outlets)?;
++        Ok(())
++    }};
++}
++
++fn select_output_names(m: &mut InferenceModel, names: &[&str]) -> Result<()> {
++    select_outputs_by_name!(m, names)
++}
++
++fn select_typed_output_names(m: &mut TypedModel, names: &[&str]) -> Result<()> {
++    select_outputs_by_name!(m, names)
++}
+diff --git a/libDF/src/wasm.rs b/libDF/src/wasm.rs
+index 2e02095..ae2849b 100644
+--- a/libDF/src/wasm.rs
++++ b/libDF/src/wasm.rs
+@@ -1,6 +1,6 @@
+ use std::boxed::Box;
+ 
+-use ndarray::prelude::*;
++use tract_core::ndarray::prelude::*;
+ use wasm_bindgen::prelude::*;
+ 
+ use crate::tract::*;
