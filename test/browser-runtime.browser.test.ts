@@ -45,3 +45,39 @@ describe("browser runtime", () => {
     expect(maxAbs(output)).toBeGreaterThan(0);
   });
 });
+
+describe("block-shift streaming", () => {
+  test("denoising 128 samples at a time matches 512 at a time", async () => {
+    const runtime = await createNoiseSuppressionModule({
+      threads: false,
+      numThreads: 1,
+    });
+    await runtime.ready;
+
+    const input = seededNoise(512 * 8);
+    const byFrame = new Float32Array(input.length);
+    const byShift = new Float32Array(input.length);
+    const frameHandle = runtime.dtln_create();
+    const shiftHandle = runtime.dtln_create();
+
+    for (let offset = 0; offset < input.length; offset += 512) {
+      runtime.dtln_denoise(
+        frameHandle,
+        input.subarray(offset, offset + 512),
+        byFrame.subarray(offset, offset + 512)
+      );
+    }
+    for (let offset = 0; offset < input.length; offset += 128) {
+      runtime.dtln_denoise(
+        shiftHandle,
+        input.subarray(offset, offset + 128),
+        byShift.subarray(offset, offset + 128)
+      );
+    }
+    runtime.dtln_stop(frameHandle);
+    runtime.dtln_stop(shiftHandle);
+
+    expect(maxAbs(byFrame)).toBeGreaterThan(0);
+    expect(Array.from(byShift)).toEqual(Array.from(byFrame));
+  });
+});
