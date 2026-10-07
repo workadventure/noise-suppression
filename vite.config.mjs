@@ -26,6 +26,7 @@ const demoPageFileNames = [
   "browser-benchmark-litert.html",
   "browser-benchmark-compare.html",
   "browser-benchmark-litert-manual.html",
+  "engine-benchmark.html",
 ];
 
 const packagedLiteRtAssets = [
