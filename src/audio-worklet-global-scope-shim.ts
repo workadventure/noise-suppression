@@ -134,4 +134,23 @@ if (!("URL" in globalThis)) {
   });
 }
 
+// No `crypto` in AudioWorkletGlobalScope either. DeepFilterNet's Rust code only draws random bytes to seed hash maps,
+// and panics ("unreachable") without it, so a non-cryptographic source is enough.
+if (!("crypto" in globalThis)) {
+  Object.defineProperty(globalThis, "crypto", {
+    configurable: true,
+    value: {
+      getRandomValues<T extends ArrayBufferView | null>(array: T): T {
+        if (array) {
+          const bytes = new Uint8Array(array.buffer, array.byteOffset, array.byteLength);
+          for (let i = 0; i < bytes.length; i++) {
+            bytes[i] = Math.floor(Math.random() * 256);
+          }
+        }
+        return array;
+      },
+    },
+  });
+}
+
 export {};

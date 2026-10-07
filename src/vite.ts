@@ -8,24 +8,62 @@ export interface NoiseSuppressionAudioWorkletVitePluginOptions {
   processorPath?: string;
 }
 
-const defaultProcessorPath = fileURLToPath(
-  new URL(
-    /* @vite-ignore */ "./assets/audio-worklet-processor.js",
-    import.meta.url,
-  ),
-);
-const audioWorkletEntryPath = fileURLToPath(
-  new URL(/* @vite-ignore */ "./audio-worklet.js", import.meta.url),
-);
-const defaultProcessorUrlExpression =
-  'new URL("assets/audio-worklet-processor.js", import.meta.url).href';
+interface DevAsset {
+  /** The `new URL(...)` expression the library build emits for this asset. */
+  expression: string;
+  devUrl: string;
+  filePath: string;
+  contentType: string;
+}
+
+function distPath(relativePath: string): string {
+  return fileURLToPath(new URL(/* @vite-ignore */ relativePath, import.meta.url));
+}
+
+function urlExpression(assetPath: string): string {
+  return `new URL("${assetPath}", import.meta.url).href`;
+}
+
+const DEEPFILTERNET_DEV_PREFIX = "/__workadventure_noise_suppression/deepfilternet/";
+
+// Vite dev mode does not serve these package assets as raw files from the dependency, so the plugin serves them
+// itself and points the entry at them.
+const deepFilterNetAssets: DevAsset[] = [
+  {
+    expression: urlExpression("assets/deepfilternet-worklet-processor.js"),
+    devUrl: `${DEEPFILTERNET_DEV_PREFIX}worklet-processor.js`,
+    filePath: distPath("./assets/deepfilternet-worklet-processor.js"),
+    contentType: "text/javascript",
+  },
+  {
+    expression: urlExpression("assets/deepfilternet/df_bg.wasm"),
+    devUrl: `${DEEPFILTERNET_DEV_PREFIX}df_bg.wasm`,
+    filePath: distPath("./assets/deepfilternet/df_bg.wasm"),
+    contentType: "application/wasm",
+  },
+  {
+    expression: urlExpression("assets/deepfilternet/DeepFilterNet3_onnx.tar.gz"),
+    devUrl: `${DEEPFILTERNET_DEV_PREFIX}DeepFilterNet3_onnx.tar.gz`,
+    filePath: distPath("./assets/deepfilternet/DeepFilterNet3_onnx.tar.gz"),
+    contentType: "application/gzip",
+  },
+];
 
 export function noiseSuppressionAudioWorkletVitePlugin(
   options: NoiseSuppressionAudioWorkletVitePluginOptions = {},
 ): Plugin {
-  const moduleUrl =
-    options.moduleUrl ?? NOISE_SUPPRESSION_AUDIO_WORKLET_DEV_MODULE_URL;
-  const processorPath = options.processorPath ?? defaultProcessorPath;
+  const audioWorkletAssets: DevAsset[] = [
+    {
+      expression: urlExpression("assets/audio-worklet-processor.js"),
+      devUrl: options.moduleUrl ?? NOISE_SUPPRESSION_AUDIO_WORKLET_DEV_MODULE_URL,
+      filePath: options.processorPath ?? distPath("./assets/audio-worklet-processor.js"),
+      contentType: "text/javascript",
+    },
+  ];
+  const assetsByEntry = new Map<string, DevAsset[]>([
+    [distPath("./audio-worklet.js"), audioWorkletAssets],
+    [distPath("./deepfilternet.js"), deepFilterNetAssets],
+  ]);
 
   return {
     name: "noise-suppression-audio-worklet",
@@ -36,46 +74,42 @@ export function noiseSuppressionAudioWorkletVitePlugin(
           exclude: [
             "@workadventure/noise-suppression",
             "@workadventure/noise-suppression/audio-worklet",
+            "@workadventure/noise-suppression/deepfilternet",
           ],
         },
       };
     },
     configureServer(server: ViteDevServer) {
-      const serveProcessor: Connect.NextHandleFunction = (
-        _request,
-        response,
-        next,
-      ) => {
-        response.statusCode = 200;
-        response.setHeader("Content-Type", "text/javascript");
-        response.setHeader("Cache-Control", "no-cache");
+      for (const asset of [...audioWorkletAssets, ...deepFilterNetAssets]) {
+        const serveAsset: Connect.NextHandleFunction = (_request, response, next) => {
+          response.statusCode = 200;
+          response.setHeader("Content-Type", asset.contentType);
+          response.setHeader("Cache-Control", "no-cache");
 
-        const stream = fs.createReadStream(processorPath);
-        stream.on("error", next);
-        stream.pipe(response);
-      };
+          const stream = fs.createReadStream(asset.filePath);
+          stream.on("error", next);
+          stream.pipe(response);
+        };
 
-      server.middlewares.use(moduleUrl, serveProcessor);
+        server.middlewares.use(asset.devUrl, serveAsset);
+      }
     },
     transform(code, id) {
-      if (id.split("?")[0] !== audioWorkletEntryPath) {
+      const assets = assetsByEntry.get(id.split("?")[0] ?? "");
+      if (!assets) {
         return null;
       }
 
-      if (!code.includes(defaultProcessorUrlExpression)) {
-        this.warn(
-          "Could not rewrite the noise suppression AudioWorklet processor URL for Vite dev mode.",
-        );
-        return null;
+      let rewritten = code;
+      for (const asset of assets) {
+        if (!rewritten.includes(asset.expression)) {
+          this.warn(`Could not rewrite ${asset.expression} for Vite dev mode.`);
+          continue;
+        }
+        rewritten = rewritten.replace(asset.expression, JSON.stringify(asset.devUrl));
       }
 
-      return {
-        code: code.replace(
-          defaultProcessorUrlExpression,
-          JSON.stringify(moduleUrl),
-        ),
-        map: null,
-      };
+      return { code: rewritten, map: null };
     },
   };
 }

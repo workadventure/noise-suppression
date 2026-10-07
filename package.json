@@ -1,7 +1,7 @@
 {
   "name": "@workadventure/noise-suppression",
   "version": "0.0.1",
-  "description": "Browser noise suppression powered by LiteRT.js and DTLN models",
+  "description": "Browser noise suppression: DTLN (LiteRT.js, 16 kHz) and DeepFilterNet3 (48 kHz) AudioWorklets",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -16,6 +16,11 @@
       "types": "./dist/audio-worklet.d.ts",
       "import": "./dist/audio-worklet.js",
       "default": "./dist/audio-worklet.js"
+    },
+    "./deepfilternet": {
+      "types": "./dist/deepfilternet.d.ts",
+      "import": "./dist/deepfilternet.js",
+      "default": "./dist/deepfilternet.js"
     },
     "./background-noise": {
       "types": "./dist/background-noise.d.ts",
@@ -52,7 +57,8 @@
     "webrtc",
     "denoise",
     "real-time",
-    "audio-processing"
+    "audio-processing",
+    "deepfilternet"
   ],
   "repository": {
     "type": "git",

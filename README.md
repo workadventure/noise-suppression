@@ -13,9 +13,10 @@ Browser-side noise suppression and noise-detection for realtime voice applicatio
 This package provides two complementary tools for handling noisy microphone
 input directly in the browser:
 
-- **Noise suppression** runs the DTLN speech-denoising models with LiteRT.js.
-  Its primary integration path is an `AudioWorklet` that can sit between a
-  microphone track and a WebRTC peer connection.
+- **Noise suppression** runs either the DTLN speech-denoising models with
+  LiteRT.js (16 kHz), or [DeepFilterNet3](#deepfilternet3-48-khz) (48 kHz,
+  better quality, keeps the full voice band). Both are `AudioWorklet` nodes that
+  sit between a microphone track and a WebRTC peer connection.
 - **[Background noise detection](#detect-sustained-background-noise)** identifies
   sustained noise that is unlikely to contain speech, so an application can
   warn the user or suggest enabling noise suppression.
@@ -171,6 +172,61 @@ The bundled worklet path currently targets single-threaded LiteRT execution.
 Keep `threads` unset or `false` unless you are testing a custom worklet bundle
 that supports threaded Wasm loading.
 
+## DeepFilterNet3 (48 kHz)
+
+[DeepFilterNet3](https://github.com/Rikorose/DeepFilterNet) is the recommended
+engine for voice calls. DTLN works at 16 kHz, so nothing above 8 kHz is ever
+sent and voices sound muffled; DeepFilterNet3 keeps the whole band up to 24 kHz.
+On 50 VoiceBank+DEMAND pairs it scores PESQ 3.22 against 2.52 for DTLN, and it
+uses less CPU in the worklet (see
+[the comparison](./docs/experiments/fullband-denoisers/README.md) and
+[ADR 0011](./docs/adr/0011-add-deepfilternet3-engine-with-pause-gate.md)).
+
+```ts
+import {
+  createDeepFilterNetAudioWorklet,
+  DEEPFILTERNET_SAMPLE_RATE,
+} from "@workadventure/noise-suppression/deepfilternet";
+
+const context = new AudioContext({ sampleRate: DEEPFILTERNET_SAMPLE_RATE }); // 48000
+const source = context.createMediaStreamSource(microphoneStream);
+const destination = context.createMediaStreamDestination();
+
+const deepFilterNet = await createDeepFilterNetAudioWorklet(context);
+source.connect(deepFilterNet.node).connect(destination);
+await deepFilterNet.ready;
+
+// Later: deepFilterNet.dispose();
+```
+
+Options, all optional:
+
+- `speechAttenuationDb` (default `25`): the most DeepFilterNet3 may attenuate
+  while someone speaks. Unlimited (`100`) gates the background to silence between
+  words, which listeners hear as dropouts and a metallic background.
+- `pauseAttenuationDb` (default `45`): attenuation reached in pauses, through a
+  gate after DeepFilterNet3. The gate reads voice activity on the denoised
+  signal (ignoring what the model removed, such as keystrokes) and delays the
+  output by 30 ms so it reopens before the first syllable.
+  Set it to `speechAttenuationDb` or lower to disable the gate.
+- `bypassUntilReady` (default `true`): pass the microphone through while loading
+  and after a failure.
+- `readyTimeoutMs`, `moduleUrl`, `wasmUrl`, `modelUrl`: as for DTLN.
+
+Costs to plan for:
+
+- Download: 9 MB of Wasm (2.3 MB gzipped) and an 8 MB model, fetched when the
+  node is created. Load it only when the user turns noise suppression on.
+- Latency: about 40 ms for the model, plus 30 ms with the pause gate.
+- The `AudioContext` must run at 48 kHz; creating the node on another rate
+  throws.
+- Serve `DeepFilterNet3_onnx.tar.gz` as is. If the server adds
+  `Content-Encoding: gzip`, the browser inflates it; the package gzips it again,
+  at some CPU cost.
+
+The Wasm is DeepFilterNet's `libDF` compiled by
+`scripts/build-deepfilternet-wasm.sh` (see `forks/deepfilternet/`).
+
 ## Runtime Requirements
 
 - Use an `AudioContext` at `16000` Hz for DTLN processing.
@@ -226,10 +282,10 @@ export default defineConfig({
 });
 ```
 
-The plugin serves the packaged worklet processor as raw JavaScript in dev and
-rewrites the package's default AudioWorklet URL to that raw endpoint. Application
-code can keep calling `createNoiseSuppressionAudioWorklet()` without a
-dev-specific `moduleUrl` override.
+The plugin serves the packaged worklet processors (and DeepFilterNet3's Wasm and
+model) as raw files in dev and rewrites the package's default URLs to them.
+Application code can keep calling `createNoiseSuppressionAudioWorklet()` or
+`createDeepFilterNetAudioWorklet()` without dev-specific URL overrides.
 
 ## Detect Sustained Background Noise
 
@@ -501,5 +557,8 @@ The library build writes:
 - Threaded LiteRT experiments require cross-origin isolation in production.
 - The background-noise detector uses Silero VAD and is independent from the DTLN
   denoiser.
+- DeepFilterNet3 runs libDF (Rust, tract inference) compiled to Wasm, in its own
+  AudioWorklet processor; it shares the ring buffer and global-scope shims with
+  the DTLN processor, not its runtime.
 
 See [Architecture Decision Records](./docs/adr/README.md) for more background.

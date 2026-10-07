@@ -10,7 +10,6 @@ const devAudioWorkletModulePath = "/__noise_suppression_audio_worklet_processor.
 const audioWorkletProcessorFileName = "assets/audio-worklet-processor.js";
 const audioWorkletModuleUrlVirtualId =
   "virtual:noise-suppression-audio-worklet-module-url";
-const resolvedAudioWorkletModuleUrlVirtualId = `\0${audioWorkletModuleUrlVirtualId}`;
 const defaultAssetsVirtualId = "virtual:noise-suppression-default-assets";
 const resolvedDefaultAssetsVirtualId = `\0${defaultAssetsVirtualId}`;
 const backgroundNoiseDetectorSileroAssetsVirtualId =
@@ -154,33 +153,40 @@ export default decodeBase64(base64);
   };
 }
 
-function audioWorkletBundlePlugin() {
+function audioWorkletBundlePlugin({
+  virtualId = audioWorkletModuleUrlVirtualId,
+  input = "src/audio-worklet-processor.ts",
+  fileName = audioWorkletProcessorFileName,
+  devPath = devAudioWorkletModulePath,
+} = {}) {
+  const resolvedVirtualId = `\0${virtualId}`;
+
   let bundledCodePromise;
   let command = "build";
   let audioWorkletAssetReferenceId;
 
   return {
-    name: "noise-suppression-audio-worklet-bundle",
+    name: `noise-suppression-audio-worklet-bundle:${virtualId}`,
     configResolved(config) {
       command = config.command;
     },
     resolveId(source) {
-      if (source === audioWorkletModuleUrlVirtualId) {
-        return resolvedAudioWorkletModuleUrlVirtualId;
+      if (source === virtualId) {
+        return resolvedVirtualId;
       }
 
       return null;
     },
     async load(id) {
-      if (id === resolvedAudioWorkletModuleUrlVirtualId) {
+      if (id === resolvedVirtualId) {
         if (command === "serve") {
-          return `export default ${JSON.stringify(devAudioWorkletModulePath)};`;
+          return `export default ${JSON.stringify(devPath)};`;
         }
 
-        bundledCodePromise ??= buildAudioWorkletDevBundle();
+        bundledCodePromise ??= buildAudioWorkletDevBundle(input);
         audioWorkletAssetReferenceId ??= this.emitFile({
           type: "asset",
-          fileName: audioWorkletProcessorFileName,
+          fileName,
           source: await bundledCodePromise,
         });
 
@@ -190,9 +196,9 @@ function audioWorkletBundlePlugin() {
       return null;
     },
     configureServer(server) {
-      server.middlewares.use(devAudioWorkletModulePath, async (_request, response, next) => {
+      server.middlewares.use(devPath, async (_request, response, next) => {
         try {
-          bundledCodePromise ??= buildAudioWorkletDevBundle();
+          bundledCodePromise ??= buildAudioWorkletDevBundle(input);
           const bundledCode = await bundledCodePromise;
 
           response.statusCode = 200;
@@ -279,6 +285,50 @@ function assetDirectory(assetUrl) {
   };
 }
 
+function deepFilterNetAssetsPlugin() {
+  const virtualId = "virtual:deepfilternet-default-assets";
+  const resolvedVirtualId = `\0${virtualId}`;
+  let command = "build";
+
+  return {
+    name: "deepfilternet-default-assets",
+    configResolved(config) {
+      command = config.command;
+    },
+    resolveId(source) {
+      return source === virtualId ? resolvedVirtualId : null;
+    },
+    load(id) {
+      if (id !== resolvedVirtualId) {
+        return null;
+      }
+
+      if (command === "serve") {
+        return `
+export const defaultDeepFilterNetWasmUrl = "/forks/deepfilternet/df_bg.wasm";
+export const defaultDeepFilterNetModelUrl = "/model/DeepFilterNet3_onnx.tar.gz";
+`;
+      }
+
+      const wasmReference = this.emitFile({
+        type: "asset",
+        fileName: "assets/deepfilternet/df_bg.wasm",
+        source: fs.readFileSync(path.resolve(rootDir, "forks/deepfilternet/df_bg.wasm")),
+      });
+      const modelReference = this.emitFile({
+        type: "asset",
+        fileName: "assets/deepfilternet/DeepFilterNet3_onnx.tar.gz",
+        source: fs.readFileSync(path.resolve(rootDir, "model/DeepFilterNet3_onnx.tar.gz")),
+      });
+
+      return `
+export const defaultDeepFilterNetWasmUrl = import.meta.ROLLUP_FILE_URL_${wasmReference};
+export const defaultDeepFilterNetModelUrl = import.meta.ROLLUP_FILE_URL_${modelReference};
+`;
+    },
+  };
+}
+
 function backgroundNoiseDetectorSileroAssetsPlugin() {
   let command = "build";
 
@@ -340,7 +390,7 @@ function assetDirectory(assetUrl) {
   };
 }
 
-async function buildAudioWorkletDevBundle() {
+async function buildAudioWorkletDevBundle(input) {
   const result = await build({
     root: rootDir,
     configFile: false,
@@ -377,7 +427,7 @@ async function buildAudioWorkletDevBundle() {
       sourcemap: false,
       emptyOutDir: false,
       rollupOptions: {
-        input: path.resolve(rootDir, "src/audio-worklet-processor.ts"),
+        input: path.resolve(rootDir, input),
         output: {
           format: "iife",
           inlineDynamicImports: true,
@@ -407,6 +457,13 @@ export default defineConfig(({ command, mode }) => {
       defaultAssetsPlugin(),
       backgroundNoiseDetectorSileroAssetsPlugin(),
       audioWorkletBundlePlugin(),
+      audioWorkletBundlePlugin({
+        virtualId: "virtual:deepfilternet-audio-worklet-module-url",
+        input: "src/deepfilternet-worklet-processor.ts",
+        fileName: "assets/deepfilternet-worklet-processor.js",
+        devPath: "/__deepfilternet_audio_worklet_processor.js",
+      }),
+      deepFilterNetAssetsPlugin(),
       ...(command === "serve"
         ? [
             viteStaticCopy({
@@ -452,6 +509,7 @@ export default defineConfig(({ command, mode }) => {
             entry: {
               index: path.resolve(rootDir, "src/index.ts"),
               "audio-worklet": path.resolve(rootDir, "src/audio-worklet.ts"),
+              deepfilternet: path.resolve(rootDir, "src/deepfilternet.ts"),
               "background-noise": path.resolve(
                 rootDir,
                 "src/background-noise.ts"

@@ -27,3 +27,13 @@ declare module "virtual:background-noise-detector-silero-assets" {
   export const defaultBackgroundNoiseDetectorBaseAssetPath: string;
   export const defaultBackgroundNoiseDetectorOnnxWasmBasePath: string;
 }
+
+declare module "virtual:deepfilternet-audio-worklet-module-url" {
+  const moduleUrl: string;
+  export default moduleUrl;
+}
+
+declare module "virtual:deepfilternet-default-assets" {
+  export const defaultDeepFilterNetWasmUrl: string;
+  export const defaultDeepFilterNetModelUrl: string;
+}
