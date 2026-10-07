@@ -122,7 +122,8 @@ describe("PauseGate", () => {
   });
 });
 
-describe("DeepFilterNet3 AudioWorklet", () => {
+// Running the model over seconds of 48 kHz audio takes up to ~15 s on the Firefox CI runner, the default limit.
+describe("DeepFilterNet3 AudioWorklet", { timeout: 60_000 }, () => {
   test("rejects a context that does not run at 48 kHz", async () => {
     const context = new OfflineAudioContext(1, 16000, 16000);
 
