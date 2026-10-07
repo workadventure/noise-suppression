@@ -1,6 +1,6 @@
 # ADR 0006: Buffer AudioWorklet Input and Output Around 512-Sample DTLN Frames
 
-- Status: Accepted
+- Status: Superseded by [ADR 0010](./0010-run-one-dtln-block-shift-per-render-quantum.md)
 - Date: 2026-03-13
 
 ## Context

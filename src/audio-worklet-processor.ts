@@ -24,7 +24,10 @@ interface BenchmarkState {
   renderQuantumSamples: number | null;
 }
 
-const DENOISE_FRAME_SAMPLES = 512;
+// One DTLN block shift, which is also one render quantum. DTLN keeps its
+// 512-sample window internally, so 128 samples at a time is bit-identical to
+// 512 at a time, without bunching four inferences into a single callback.
+const DENOISE_FRAME_SAMPLES = 128;
 const RING_BUFFER_CAPACITY = 2048;
 
 function nowMs(): number {
