@@ -51,21 +51,25 @@ npm install @workadventure/noise-suppression
 | `AudioContext` rate | 48 kHz | 16 kHz |
 | Voice band kept | up to 24 kHz | up to 8 kHz |
 | PESQ-WB / DNSMOS OVRL | 2.97 / 3.20 | 2.31 / 3.02 |
-| Keystrokes removed | 45 dB, at once | 9 dB, after adapting |
+| Keystrokes removed (steady typing) | 45 dB (7.7 dB in the first 0.5 s) | 9 dB (2.7 dB in the first 0.5 s) |
 | Delay added | 71 ms (51 ms with `pauseGateLookaheadFrames: 1`) | 48 ms |
-| CPU on an Apple M4 | 2.7 % of a core | 1.9 % |
+| Model CPU on an Apple M4 | 2.7 % of a core | 1.9 % |
 | Download | about 11 MB | about 6 MB |
 
+PESQ-WB estimates wideband speech quality and DNSMOS OVRL the overall quality a
+listener perceives; higher is better for both. The model CPU covers the model
+only, not the worklet's buffering and pause gate.
+
 - **DeepFilterNet3** is the default choice: it keeps the whole voice band and
-  scores above DTLN on every perceptual measure (better on 49 of 50 test clips),
-  for a little more CPU.
+  scores above DTLN on the reported perceptual measures, with a higher PESQ-WB on
+  49 of 50 test clips, for a little more CPU.
 - **DTLN** is the lightest and the smallest download. It sends nothing above
   8 kHz, so voices sound muffled, and it barely removes keystrokes. Use it as the
   fallback where DeepFilterNet3 cannot keep up (see `onOverload`).
 
 DeepFilterNet3's low-latency model (DeepFilterNet3_ll) was evaluated and not
-kept: same quality, three times the CPU, a 35 MB model, and its 20 ms less delay
-are also obtained with `pauseGateLookaheadFrames: 1`.
+kept: same quality, three times the CPU and a 35 MB model. The same 20 ms
+latency reduction is available with `pauseGateLookaheadFrames: 1`.
 
 Numbers from the [engine benchmark](./docs/experiments/engine-benchmark/README.md).
 Speed depends on the machine: run
@@ -115,7 +119,7 @@ if (!processedTrack) {
 
 peerConnection.addTrack(processedTrack, destination.stream);
 
-// When the call ends or when you switch back to the raw microphone:
+// When the call ends:
 // worklet.dispose();
 // source.disconnect();
 // microphoneStream.getTracks().forEach((track) => track.stop());
@@ -145,6 +149,10 @@ if (!sender) {
 await sender.replaceTrack(processedTrack);
 ```
 
+To switch back to the raw microphone during a call, first
+`await sender.replaceTrack(microphoneStream.getAudioTracks()[0]!)`, then dispose
+the worklet and stop the processed tracks. Keep the microphone tracks running.
+
 ## DeepFilterNet3
 
 [DeepFilterNet3](https://github.com/Rikorose/DeepFilterNet) runs libDF, its
@@ -167,19 +175,26 @@ Options, all optional:
 | --- | ---: | --- |
 | `speechAttenuationDb` | `25` | Most the model may attenuate while someone speaks. Unlimited (`100`) gates the background to silence between words, which listeners hear as dropouts and a metallic background |
 | `pauseAttenuationDb` | `45` | Attenuation reached in pauses, through a gate after the model. Set it to `speechAttenuationDb` or lower to disable the gate and its delay |
-| `pauseGateLookaheadFrames` | `3` | Frames (10 ms each) the gate delays the output by, so it is open when a word starts. The gate ramps open over them. `1` cuts 20 ms of delay, and opens the gate in one step instead. Keep it above `minSpeechFrames` |
+| `pauseGateLookaheadFrames` | `3` | Frames (10 ms each) the gate delays the output by, so it is open when a word starts. The gate ramps open over them. `1` cuts 20 ms of delay: the gate then ramps open over one 10 ms frame instead of three. Keep it above `minSpeechFrames` |
 | `minSpeechFrames` | `1` | Consecutive speech frames the gate needs before opening. `2` keeps brief keystrokes the model lets through from opening it |
 | `postGain` | `false` | Level the voice after the model (`true` or `Partial<PostGainOptions>`, defaults in `DEFAULT_POST_GAIN`). Meant to replace the browser's automatic gain control, which runs before the model and raises the noise too: set `autoGainControl: false` on the microphone when enabling it |
 | `maxLoad` | `0.7` | Share of real time the model may use before `onOverload` fires; `0` disables the check |
 | `onOverload` | | Called once, with the load, when two 2 s windows in a row exceed `maxLoad`. The node keeps running: switch to DTLN or to the raw microphone |
-| `onLoadReport` | | Called once after `loadReportAfterMs` (default 60 s) with the measured load (median, p95, max per 2 s window) and the slow frames, for telemetry |
-| `bypassUntilReady` | `true` | Pass the microphone through while loading and after a failure; otherwise silence |
-| `readyTimeoutMs` | `30000` | Time `ready` waits before rejecting |
+| `onLoadReport` | | `(report: LoadReport) => void`, called once for telemetry with `windows`, `medianLoad`, `p95Load`, `maxLoad` (share of real time per 2 s window), `slowFrames` (frames measured at 3 ms or more) and `frames` |
+| `loadReportAfterMs` | `60000` | Processed audio before that report, rounded to 2 s windows (at least one). `0` disables it |
+| `bypassUntilReady` | `true` | Pass the microphone through while the processor initializes and after it fails; otherwise silence |
+| `readyTimeoutMs` | `30000` | Time `ready` waits, from the node's creation, before rejecting |
 | `moduleUrl`, `wasmUrl`, `modelUrl` | packaged | Override the processor, Wasm or model URL |
 
-The gate reads voice activity on the denoised signal and ignores what the model
-removed, such as keystrokes, so pauses get quieter without cutting the first
-syllable of a word. The whole chain adds 71 ms: 30 ms for the model, 10.7 ms to
+The Wasm and the model are downloaded and compiled before the function returns
+the node, so neither `bypassUntilReady` nor `readyTimeoutMs` covers that step, and
+a download failure rejects the returned promise. Keep the current microphone route
+until the node is created.
+
+The gate detects speech from the denoised level and from how much the model
+removed, so keystrokes alone do not open it. Its lookahead keeps the start of
+words, but a word that starts during a keystroke can lose about 30 ms of its
+attack. The whole chain adds 71 ms: 30 ms for the model, 10.7 ms to
 reframe 128-sample quanta into 480-sample frames, and 30 ms of gate lookahead
 (51 ms with `pauseGateLookaheadFrames: 1`, 41 ms without the gate). See
 [ADR 0011](./docs/adr/0011-add-deepfilternet3-engine-with-pause-gate.md) and
@@ -200,7 +215,11 @@ import {
   isNoiseSuppressionProcessingStartedMessage,
 } from "@workadventure/noise-suppression/audio-worklet";
 
+// microphoneStream: the stream captured with getUserMedia, as above
 const context = new AudioContext({ sampleRate: 16000 });
+await context.resume();
+const sourceNode = context.createMediaStreamSource(microphoneStream);
+const destinationNode = context.createMediaStreamDestination();
 const worklet = await createNoiseSuppressionAudioWorklet(context);
 
 const stopObserving = observeNoiseSuppressionAudioWorkletMessages(
@@ -262,9 +281,9 @@ that supports threaded Wasm loading.
 - Use one input and one output channel.
 - Create or resume the `AudioContext` after a user gesture when the browser
   requires it.
-- The default worklet bundle includes the LiteRT Wasm bytes and the two DTLN
-  model files, so the worklet path does not need the application to host those
-  files separately.
+- The default processor bundle embeds both DTLN models. The LiteRT Wasm is
+  fetched separately from the packaged `dist/vendor/litert/` files: keep them
+  when deploying, since `moduleUrl` only overrides the processor's URL.
 
 The processor buffers four 128-sample render quanta into one 512-sample DTLN
 frame, then writes the denoised samples back to an output ring buffer.
@@ -286,13 +305,16 @@ If your application serves assets from a constrained location, you can override
 the URLs:
 
 ```ts
-const deepFilterNet = await createDeepFilterNetAudioWorklet(context, {
+const deepFilterNetContext = new AudioContext({ sampleRate: 48000 });
+const deepFilterNet = await createDeepFilterNetAudioWorklet(deepFilterNetContext, {
   moduleUrl: "/assets/noise-suppression/deepfilternet-worklet-processor.js",
   wasmUrl: "/assets/noise-suppression/df_bg.wasm",
   modelUrl: "/assets/noise-suppression/DeepFilterNet3_onnx.tar.gz",
 });
 
-const dtln = await createNoiseSuppressionAudioWorklet(context, {
+// or, for DTLN:
+const dtlnContext = new AudioContext({ sampleRate: 16000 });
+const dtln = await createNoiseSuppressionAudioWorklet(dtlnContext, {
   moduleUrl: "/assets/noise-suppression/audio-worklet-processor.js",
 });
 ```
@@ -307,6 +329,7 @@ Add the package Vite plugin:
 
 ```ts
 // vite.config.ts
+import { defineConfig } from "vite";
 import { noiseSuppressionAudioWorkletVitePlugin } from "@workadventure/noise-suppression/vite";
 
 export default defineConfig({
@@ -575,6 +598,8 @@ The library build writes:
 - `dist/audio-worklet.d.ts`
 - `dist/deepfilternet.js`
 - `dist/deepfilternet.d.ts`
+- `dist/vite.js`
+- `dist/vite.d.ts`
 - `dist/background-noise.js`
 - `dist/background-noise.d.ts`
 - `dist/assets/audio-worklet-processor.js`

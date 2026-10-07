@@ -3,7 +3,9 @@
 Compares the noise suppression models of this package as an application gets them: **DTLN** (`/audio-worklet`) and
 **DeepFilterNet3** (`/deepfilternet`), each through its shipped `AudioWorklet` with its default options (for
 DeepFilterNet3: 25 dB limit while speaking, pause gate to 45 dB, 3 frames of gate lookahead), plus DeepFilterNet3 with
-its gate turned off or shortened. DeepFilterNet3's **low-latency model** (DeepFilterNet3_ll, #22) was measured with the
+its gate turned off or shortened. Quality and delay are measured through the shipped worklets; speed measures the
+models' processing on the main thread, with the same frame sizes, so it leaves out the worklet's buffering, the pause
+gate and the load monitoring. DeepFilterNet3's **low-latency model** (DeepFilterNet3_ll, #22) was measured with the
 same scripts on that pull request's branch (commit 930fc7a), then dropped: its rows are marked #22 and cannot be
 reproduced from this branch. Earlier experiments measured the models alone:
 [fullband-denoisers](../fullband-denoisers/README.md) (before integration) and
@@ -14,17 +16,17 @@ reproduced from this branch. Earlier experiments measured the models alone:
 **DeepFilterNet3 (standard model) is the engine to use by default**, and DTLN stays as the fallback for machines that
 cannot keep up. The low-latency model is dropped.
 
-- DeepFilterNet3 beats DTLN on every perceptual measure (PESQ +0.66 ± 0.09, better on 49 of 50 clips; DNSMOS
-  OVRL +0.18), sends the band above 8 kHz that DTLN drops, and removes keystrokes at once (45 dB, against 9 dB for
-  DTLN once it has adapted). It costs 2.7 % of a core on an M4, against 1.9 % for DTLN, and 11 MB to download
-  against 6 MB.
+- DeepFilterNet3 beats DTLN on the reported perceptual measures (PESQ +0.66 ± 0.09, higher on 49 of 50 clips;
+  DNSMOS OVRL +0.18, higher on 43 of 50), sends the band above 8 kHz that DTLN drops, and attenuates synthetic typing
+  by 45 dB once typing is steady, against 9 dB for DTLN (7.7 and 2.7 dB in the first 0.5 s). Its model costs 2.7 %
+  of a core on an M4, against 1.9 % for DTLN, and 11 MB to download against 6 MB.
 - The low-latency model (#22) brought nothing the standard one cannot: same quality (PESQ +0.02 ± 0.05, not significant),
   and its 20 ms of delay saved are also saved, at no cost, by a 1-frame gate lookahead (50.7 ms both). It cost three
   times the CPU, 38 MB to download, and let keystrokes through for the first half second.
 - Keep the pause gate: without it, the background is less removed (DNSMOS BAK 3.99 against 4.07) and keystrokes only
   get the 25 dB limit. Its lookahead can go from 3 frames to 1 (−20 ms, quality unchanged within ±0.02) if listeners
-  do not mind the background coming back in one step instead of a 30 ms ramp when a word starts; this is a
-  listening test, the metrics cannot settle it.
+  do not mind the gate ramping open over one 10 ms frame instead of three when a word starts; this is a listening
+  test, the metrics cannot settle it.
 - Not measured yet: an x86 laptop. Scaling the M4 figures by the 4.5× an i7-10750H took on the same build (below),
   DeepFilterNet3 should stay around 1.2 ms per frame, inside the 2.67 ms quantum (the low-latency model would have
   taken around 3.7 ms, outside it). Run the benchmark page on Intel and AMD laptops to confirm.
@@ -34,7 +36,10 @@ cannot keep up. The low-latency model is dropped.
 ### Quality
 
 50 random VoiceBank+DEMAND test pairs (seed 0), through each worklet, `eval.py`. Delay is the lag of the best
-alignment with the clean reference, so the whole chain: model, reframing and gate.
+alignment with the clean reference, so the whole chain: model, reframing and gate. PESQ-WB estimates wideband speech
+quality and STOI intelligibility; DNSMOS estimates the quality of the speech (SIG), of the background (BAK) and
+overall (OVRL, P.808). Higher is better for these and for SI-SDR (dB); lower is better for the log-spectral distance
+above 8 kHz (LSD, dB) and for the delay.
 
 | | PESQ-WB | STOI | SI-SDR | DNSMOS SIG | BAK | OVRL | P.808 | LSD 8-24 kHz | delay |
 |---|---|---|---|---|---|---|---|---|---|
@@ -77,8 +82,10 @@ Attenuation of a synthetic typing clip (`typing()` in `eval.py`: typing 1-11 s, 
 ### Speed
 
 Apple M4 (10 cores), macOS 27, Playwright Chromium 145 and WebKit 26, `node run.mjs speed 5`: median of 5 rounds,
-engines alternated, a fresh browser context per run. "Work" is what the worklet computes in its busiest render quantum:
-one 480-sample frame for DeepFilterNet3, four 128-sample DTLN shifts (ADR 0006). It must fit in that quantum.
+engines alternated, a fresh browser context per run. "Work" is the model processing the worklet runs in its busiest
+render quantum, timed on the main thread (worklets have no `performance.now()`): one 480-sample frame for
+DeepFilterNet3, four 128-sample DTLN shifts (ADR 0006). It must fit in that quantum, with the worklet's own buffering
+and pause gate on top.
 
 | Chromium 145 | DTLN | DeepFilterNet3 | low latency (#22) |
 |---|---|---|---|
@@ -88,7 +95,7 @@ one 480-sample frame for DeepFilterNet3, four 128-sample DTLN shifts (ADR 0006).
 | deadline (one render quantum) | 8 ms | 2.67 ms | 2.67 ms |
 | p95 / deadline | 9 % | 11 % | 36 % |
 | CPU, share of one core | 1.9 % | 2.7 % | 8.2 % |
-| load, main thread, HTTP cache warm | 72 ms | 360 ms | 1020 ms |
+| initialization, main thread | 72 ms | 360 ms | 1020 ms |
 
 | WebKit 26 | DTLN | DeepFilterNet3 | low latency (#22) |
 |---|---|---|---|
@@ -135,6 +142,9 @@ cd docs/experiments/engine-benchmark
 ./fetch-data.sh            # VoiceBank+DEMAND test set, DNSMOS, Python metrics → data/, .venv/
 .venv/bin/python eval.py   # → results/quality.md and results/quality.json, ~20 min
 ```
+
+Existing renders are reused: to score changed code or options, remove `work/vbd-out/` and `work/typing-out/` before
+running `eval.py` again.
 
 `eval.py` picks 50 random VoiceBank+DEMAND test pairs (seed 0, the same as the earlier experiments), renders each one
 and a synthetic typing clip through each engine's worklet (`node run.mjs render`: headless Chromium,
