@@ -7,16 +7,26 @@ import {
 } from "../forks/deepfilternet/df.js";
 import { Float32RingBuffer } from "./float32-ring-buffer";
 import { PauseGate } from "./pause-gate";
+import { PostGain } from "./post-gain";
+import { LoadMonitor, LoadSampler } from "./load-monitor";
 import {
   DEEPFILTERNET_AUDIO_WORKLET_PROCESSOR_NAME,
   DEEPFILTERNET_SAMPLE_RATE,
   type DeepFilterNetAudioWorkletDisposeMessage,
   type DeepFilterNetAudioWorkletErrorMessage,
+  type DeepFilterNetAudioWorkletOverloadMessage,
+  type DeepFilterNetAudioWorkletLoadReportMessage,
   type DeepFilterNetAudioWorkletProcessorOptions,
   type DeepFilterNetAudioWorkletReadyMessage,
 } from "./deepfilternet-shared";
 
 const RING_BUFFER_CAPACITY = 4096;
+
+// performance is missing from some AudioWorkletGlobalScopes; Date.now() is coarser, but a 2 s sum averages it out.
+const now: () => number =
+  typeof performance !== "undefined" && typeof performance.now === "function"
+    ? () => performance.now()
+    : () => Date.now();
 
 class DeepFilterNetProcessor extends AudioWorkletProcessor {
   private readonly bypassUntilReady: boolean;
@@ -24,6 +34,9 @@ class DeepFilterNetProcessor extends AudioWorkletProcessor {
   private frameSamples = 0;
   private frame = new Float32Array(0);
   private pauseGate: PauseGate | undefined;
+  private postGain: PostGain | undefined;
+  private loadMonitor: LoadMonitor | undefined;
+  private loadSampler: LoadSampler | undefined;
   private readonly inputRing = new Float32RingBuffer(RING_BUFFER_CAPACITY);
   private readonly outputRing = new Float32RingBuffer(RING_BUFFER_CAPACITY);
 
@@ -49,6 +62,20 @@ class DeepFilterNetProcessor extends AudioWorkletProcessor {
       this.frame = new Float32Array(this.frameSamples);
       if (processorOptions.pauseGate) {
         this.pauseGate = new PauseGate(processorOptions.pauseGate);
+      }
+      if (processorOptions.postGain) {
+        this.postGain = new PostGain(processorOptions.postGain);
+      }
+      if (processorOptions.maxLoad > 0) {
+        // One window = 200 frames = 2 s of audio.
+        this.loadMonitor = new LoadMonitor(200, (this.frameSamples / sampleRate) * 1000, processorOptions.maxLoad);
+      }
+      if (processorOptions.loadReportAfterMs > 0) {
+        this.loadSampler = new LoadSampler(
+          200,
+          (this.frameSamples / sampleRate) * 1000,
+          Math.max(1, Math.round(processorOptions.loadReportAfterMs / 2000))
+        );
       }
       const ready: DeepFilterNetAudioWorkletReadyMessage = { type: "ready", frameSamples: this.frameSamples };
       this.port.postMessage(ready);
@@ -81,8 +108,21 @@ class DeepFilterNetProcessor extends AudioWorkletProcessor {
       this.inputRing.push(input);
       while (this.inputRing.availableRead() >= this.frameSamples) {
         this.inputRing.pullInto(this.frame);
+        const startedAt = now();
         const denoised = df_process_frame(this.state, this.frame);
-        this.outputRing.push(this.pauseGate ? this.pauseGate.process(denoised, this.frame) : denoised);
+        const gated = this.pauseGate ? this.pauseGate.process(denoised, this.frame) : denoised;
+        this.outputRing.push(this.postGain ? this.postGain.process(gated) : gated);
+        const elapsedMs = now() - startedAt;
+        const overloadLoad = this.loadMonitor?.record(elapsedMs);
+        const loadReport = this.loadSampler?.record(elapsedMs);
+        if (loadReport) {
+          const message: DeepFilterNetAudioWorkletLoadReportMessage = { type: "load-report", ...loadReport };
+          this.port.postMessage(message);
+        }
+        if (overloadLoad !== undefined) {
+          const overload: DeepFilterNetAudioWorkletOverloadMessage = { type: "overload", load: overloadLoad };
+          this.port.postMessage(overload);
+        }
       }
       // Underflow only happens in the first frame (480-sample frames, 128-sample quanta).
       if (!this.outputRing.pullInto(output)) {

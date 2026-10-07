@@ -11,6 +11,8 @@ import {
   type DeepFilterNetAudioWorkletProcessorOptions,
   type DeepFilterNetAudioWorkletReadyMessage,
 } from "./deepfilternet-shared";
+import { DEFAULT_POST_GAIN, type PostGainOptions } from "./post-gain";
+import type { LoadReport } from "./load-monitor";
 
 interface AudioWorkletCapableContext extends BaseAudioContext {
   readonly audioWorklet: AudioWorklet;
@@ -29,6 +31,34 @@ export interface DeepFilterNetAudioWorkletOptions {
   pauseAttenuationDb?: number;
   /** Pass the microphone through while loading, and after a failure (otherwise silence). Default true. */
   bypassUntilReady?: boolean;
+  /**
+   * Consecutive speech frames the pause gate needs before opening (default 1). 2 or 3 keeps brief keystrokes the
+   * model lets through from opening it; see `PauseGateOptions.minSpeechFrames`.
+   */
+  minSpeechFrames?: number;
+  /**
+   * Frames the pause gate delays the output by, so it is open when a word starts (default 3 = 30 ms). The whole
+   * chain then adds 30 ms (model) + 10.7 ms (reframing) + this: 1 cuts 20 ms of voice delay for a sharper attack.
+   * Keep it above `minSpeechFrames`, or the first syllable of a word loses its attack. Without a gate
+   * (`pauseAttenuationDb` <= `speechAttenuationDb`) there is no such delay at all.
+   */
+  pauseGateLookaheadFrames?: number;
+  /**
+   * Level the voice after the denoiser (true: `DEFAULT_POST_GAIN`). Meant to replace the browser's automatic gain
+   * control, which runs before the denoiser and raises the noise too: turn `autoGainControl` off on the microphone
+   * when enabling it. Default off.
+   */
+  postGain?: boolean | Partial<PostGainOptions>;
+  /** Share of real time the denoiser may use before `onOverload` fires (default 0.7; 0 disables the check). */
+  maxLoad?: number;
+  /** Called once when the machine cannot keep up (two 2 s windows over `maxLoad`); the node keeps running. */
+  onOverload?: (load: number) => void;
+  /**
+   * Called once with the processor's measured cost after `loadReportAfterMs` (default 60 s) of processed audio: per
+   * 2 s window load (median, p95, max) and slow frames. For telemetry; not sent when absent.
+   */
+  onLoadReport?: (report: LoadReport) => void;
+  loadReportAfterMs?: number;
   readyTimeoutMs?: number;
   moduleUrl?: string;
   wasmUrl?: string;
@@ -44,6 +74,8 @@ export interface DeepFilterNetAudioWorkletHandle {
 const DEFAULT_SPEECH_ATTENUATION_DB = 25;
 const DEFAULT_PAUSE_ATTENUATION_DB = 45;
 const DEFAULT_READY_TIMEOUT_MS = 30000;
+const DEFAULT_MAX_LOAD = 0.7;
+const DEFAULT_LOAD_REPORT_AFTER_MS = 60_000;
 
 const moduleLoadCache = new WeakMap<AudioWorkletCapableContext, Map<string, Promise<void>>>();
 const wasmModuleCache = new Map<string, Promise<WebAssembly.Module>>();
@@ -105,10 +137,11 @@ function createReadyPromise(
     }, timeoutMs);
 
     const handleMessage = (event: MessageEvent<DeepFilterNetAudioWorkletOutboundMessage>) => {
-      cleanup();
       if (event.data.type === "ready") {
+        cleanup();
         resolve(event.data);
-      } else {
+      } else if (event.data.type === "error") {
+        cleanup();
         reject(new Error(event.data.message));
       }
     };
@@ -163,7 +196,7 @@ export async function createDeepFilterNetAudioWorklet(
       pauseAttenuationDb > speechAttenuationDb
         ? {
             extraAttenuationDb: pauseAttenuationDb - speechAttenuationDb,
-            lookaheadFrames: 3, // 30 ms
+            lookaheadFrames: options.pauseGateLookaheadFrames ?? 3, // 30 ms
             hangoverFrames: 10, // 100 ms
             releaseDbPerFrame: 0.6, // 60 dB/s
             speechAboveFloorDb: 10,
@@ -172,7 +205,15 @@ export async function createDeepFilterNetAudioWorklet(
           }
         : undefined,
     bypassUntilReady: options.bypassUntilReady ?? true,
+    postGain: options.postGain
+      ? { ...DEFAULT_POST_GAIN, ...(options.postGain === true ? {} : options.postGain) }
+      : undefined,
+    maxLoad: options.maxLoad ?? DEFAULT_MAX_LOAD,
+    loadReportAfterMs: options.onLoadReport ? (options.loadReportAfterMs ?? DEFAULT_LOAD_REPORT_AFTER_MS) : 0,
   };
+  if (processorOptions.pauseGate && options.minSpeechFrames !== undefined) {
+    processorOptions.pauseGate.minSpeechFrames = options.minSpeechFrames;
+  }
 
   const node = new AudioWorkletNode(context, DEEPFILTERNET_AUDIO_WORKLET_PROCESSOR_NAME, {
     channelCount: 1,
@@ -182,6 +223,18 @@ export async function createDeepFilterNetAudioWorklet(
     outputChannelCount: [1],
     processorOptions,
   });
+
+  const { onOverload, onLoadReport } = options;
+  if (onOverload || onLoadReport) {
+    node.port.addEventListener("message", (event: MessageEvent<DeepFilterNetAudioWorkletOutboundMessage>) => {
+      if (event.data.type === "overload") {
+        onOverload?.(event.data.load);
+      } else if (event.data.type === "load-report") {
+        const { type: _type, ...report } = event.data;
+        onLoadReport?.(report);
+      }
+    });
+  }
 
   return {
     node,
@@ -194,5 +247,7 @@ export async function createDeepFilterNetAudioWorklet(
   };
 }
 
-export { DEEPFILTERNET_SAMPLE_RATE };
+export { DEEPFILTERNET_SAMPLE_RATE, DEFAULT_POST_GAIN };
+export type { PostGainOptions };
+export type { LoadReport } from "./load-monitor";
 export type { DeepFilterNetAudioWorkletReadyMessage };
