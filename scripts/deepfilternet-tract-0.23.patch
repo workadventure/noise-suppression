@@ -284,7 +284,7 @@ index b39a987..c582472 100644
 +    select_outputs_by_name!(m, names)
 +}
 diff --git a/libDF/src/wasm.rs b/libDF/src/wasm.rs
-index 2e02095..ae2849b 100644
+index 2e02095..f2a3654 100644
 --- a/libDF/src/wasm.rs
 +++ b/libDF/src/wasm.rs
 @@ -1,6 +1,6 @@
@@ -295,3 +295,17 @@ index 2e02095..ae2849b 100644
  use wasm_bindgen::prelude::*;
  
  use crate::tract::*;
+@@ -11,7 +11,12 @@ pub struct DFState(crate::tract::DfTract);
+ #[wasm_bindgen]
+ impl DFState {
+     fn new(model_bytes: &[u8], channels: usize, atten_lim: f32) -> Self {
+-        let r_params = RuntimeParams::default_with_ch(channels).with_atten_lim(atten_lim);
++        // Always run both stages, like the PyTorch reference. libDF's defaults skip the deep filter above an estimated
++        // local SNR of 20 dB, everything above 30 dB and the gains below -10 dB, frame by frame: on VoiceBank+DEMAND
++        // that drops PESQ-WB from 3.22 to 2.12 and STOI below the unprocessed input.
++        let r_params = RuntimeParams::default_with_ch(channels)
++            .with_atten_lim(atten_lim)
++            .with_thresholds(f32::NEG_INFINITY, f32::INFINITY, f32::INFINITY);
+         let df_params = DfParams::from_bytes(model_bytes).expect("Could not load model from path");
+         let m =
+             DfTract::new(df_params, &r_params).expect("Could not initialize DeepFilter runtime.");
