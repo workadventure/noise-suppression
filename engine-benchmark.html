@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Noise suppression engine benchmark</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 2rem; line-height: 1.4; max-width: 60rem; }
+      table { border-collapse: collapse; margin: 1rem 0; }
+      th, td { border: 1px solid #ccc; padding: 0.3rem 0.6rem; text-align: right; }
+      th:first-child, td:first-child { text-align: left; }
+      textarea { width: 100%; height: 14rem; font-family: ui-monospace, monospace; }
+    </style>
+  </head>
+  <body>
+    <h1>Noise suppression engine benchmark</h1>
+    <p>
+      Times each engine's model step on 20 s of noisy speech, three rounds, on this machine and in this browser.
+      A step must finish within the render quantum it runs in (the deadline), or the audio crackles.
+      Keep the tab in the foreground; it takes about a minute.
+    </p>
+    <button id="run" type="button">Run the benchmark</button>
+    <p id="status"></p>
+    <table id="results">
+      <thead>
+        <tr>
+          <th>Engine</th><th>First load</th><th>Step mean</th><th>Step p95</th><th>Step max</th><th>Deadline</th>
+          <th>p95 / deadline</th><th>CPU (one core)</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <textarea id="json" readonly></textarea>
+    <script type="module" src="./demo/engine-benchmark.ts"></script>
+  </body>
+</html>
