@@ -154,3 +154,38 @@ if (!("crypto" in globalThis)) {
 }
 
 export {};
+
+// The wasm-bindgen glue of the DeepFilterNet3 build (0.2.118) creates a TextEncoder when the module is evaluated,
+// and AudioWorkletGlobalScope has none. It only calls encode(); encodeInto() is polyfilled by the glue itself.
+if (!("TextEncoder" in globalThis)) {
+  class AudioWorkletTextEncoder {
+    readonly encoding = "utf-8";
+
+    encode(input = ""): Uint8Array {
+      const bytes: number[] = [];
+      for (const char of input) {
+        const code = char.codePointAt(0) ?? 0;
+        if (code < 0x80) {
+          bytes.push(code);
+        } else if (code < 0x800) {
+          bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+        } else if (code < 0x10000) {
+          bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+        } else {
+          bytes.push(
+            0xf0 | (code >> 18),
+            0x80 | ((code >> 12) & 0x3f),
+            0x80 | ((code >> 6) & 0x3f),
+            0x80 | (code & 0x3f)
+          );
+        }
+      }
+      return Uint8Array.from(bytes);
+    }
+  }
+
+  Object.defineProperty(globalThis, "TextEncoder", {
+    configurable: true,
+    value: AudioWorkletTextEncoder,
+  });
+}
