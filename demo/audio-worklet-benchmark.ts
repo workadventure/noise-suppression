@@ -26,10 +26,10 @@ function formatBenchmarkCase(result: BenchmarkCaseResult): string {
     `  init: ${result.initMs.toFixed(3)} ms`,
     `  render quantum: ${result.renderQuantumSamples} samples`,
     `  denoise frame: ${result.frameSamples} samples`,
-    `  mean dtln_denoise(512): ${result.summary.meanMs.toFixed(3)} ms`,
-    `  p95 dtln_denoise(512):  ${result.summary.p95Ms.toFixed(3)} ms`,
-    `  min dtln_denoise(512):  ${result.summary.minMs.toFixed(3)} ms`,
-    `  max dtln_denoise(512):  ${result.summary.maxMs.toFixed(3)} ms`,
+    `  mean dtln_denoise(${result.frameSamples}): ${result.summary.meanMs.toFixed(3)} ms`,
+    `  p95 dtln_denoise(${result.frameSamples}):  ${result.summary.p95Ms.toFixed(3)} ms`,
+    `  min dtln_denoise(${result.frameSamples}):  ${result.summary.minMs.toFixed(3)} ms`,
+    `  max dtln_denoise(${result.frameSamples}):  ${result.summary.maxMs.toFixed(3)} ms`,
     `  threads: ${result.threads ? "enabled" : "disabled"} (${result.numThreads})`,
   ].join("\n");
 }
