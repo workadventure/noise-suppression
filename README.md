@@ -13,9 +13,9 @@ Browser-side noise suppression and noise-detection for realtime voice applicatio
 This package provides two complementary tools for handling noisy microphone
 input directly in the browser:
 
-- **Noise suppression**, with a choice of models: [DeepFilterNet3](#deepfilternet3)
-  (48 kHz, recommended), its [low-latency variant](#low-latency-model)
-  (experimental), and [DTLN](#dtln) (16 kHz). Each runs in an `AudioWorklet`
+- **Noise suppression**, with a choice of two models:
+  [DeepFilterNet3](#deepfilternet3) (48 kHz, recommended) and [DTLN](#dtln)
+  (16 kHz). Each runs in an `AudioWorklet`
   node that sits between a microphone track and a WebRTC peer connection. See
   [Choose a model](#choose-a-model).
 - **[Background noise detection](#detect-sustained-background-noise)** identifies
@@ -44,29 +44,28 @@ npm install @workadventure/noise-suppression
 
 ## Choose A Model
 
-| | DeepFilterNet3 | DeepFilterNet3 low latency | DTLN |
-| --- | --- | --- | --- |
-| Status | **recommended** | experimental | fallback |
-| Entry point | `/deepfilternet` | `/deepfilternet`, `model: "low-latency"` | `/audio-worklet` |
-| `AudioContext` rate | 48 kHz | 48 kHz | 16 kHz |
-| Voice band kept | up to 24 kHz | up to 24 kHz | up to 8 kHz |
-| PESQ-WB / DNSMOS OVRL | 2.97 / 3.20 | 2.99 / 3.21 | 2.31 / 3.02 |
-| Keystrokes removed | 45 dB, at once | 34 dB | 9 dB, after adapting |
-| Delay added | 71 ms (51 ms with `pauseGateLookaheadFrames: 1`) | 51 ms | 48 ms |
-| CPU on an Apple M4 | 2.7 % of a core | 8.2 % | 1.9 % |
-| Download | about 11 MB | about 38 MB | about 6 MB |
+| | DeepFilterNet3 | DTLN |
+| --- | --- | --- |
+| Status | **recommended** | fallback |
+| Entry point | `/deepfilternet` | `/audio-worklet` |
+| `AudioContext` rate | 48 kHz | 16 kHz |
+| Voice band kept | up to 24 kHz | up to 8 kHz |
+| PESQ-WB / DNSMOS OVRL | 2.97 / 3.20 | 2.31 / 3.02 |
+| Keystrokes removed | 45 dB, at once | 9 dB, after adapting |
+| Delay added | 71 ms (51 ms with `pauseGateLookaheadFrames: 1`) | 48 ms |
+| CPU on an Apple M4 | 2.7 % of a core | 1.9 % |
+| Download | about 11 MB | about 6 MB |
 
 - **DeepFilterNet3** is the default choice: it keeps the whole voice band and
   scores above DTLN on every perceptual measure (better on 49 of 50 test clips),
   for a little more CPU.
-- **DeepFilterNet3 low latency** has the same quality as the standard model, for
-  three times the CPU and a 35 MB model. Its only gain, 20 ms of delay, is also
-  obtained with `pauseGateLookaheadFrames: 1` on the standard model. On an
-  ordinary x86 laptop its frames are not expected to fit in the render quantum.
-  Keep it for experiments.
 - **DTLN** is the lightest and the smallest download. It sends nothing above
   8 kHz, so voices sound muffled, and it barely removes keystrokes. Use it as the
   fallback where DeepFilterNet3 cannot keep up (see `onOverload`).
+
+DeepFilterNet3's low-latency model (DeepFilterNet3_ll) was evaluated and not
+kept: same quality, three times the CPU, a 35 MB model, and its 20 ms less delay
+are also obtained with `pauseGateLookaheadFrames: 1`.
 
 Numbers from the [engine benchmark](./docs/experiments/engine-benchmark/README.md).
 Speed depends on the machine: run
@@ -166,7 +165,6 @@ Options, all optional:
 
 | Option | Default | Meaning |
 | --- | ---: | --- |
-| `model` | `"standard"` | `"low-latency"` loads [DeepFilterNet3_ll](#low-latency-model) |
 | `speechAttenuationDb` | `25` | Most the model may attenuate while someone speaks. Unlimited (`100`) gates the background to silence between words, which listeners hear as dropouts and a metallic background |
 | `pauseAttenuationDb` | `45` | Attenuation reached in pauses, through a gate after the model. Set it to `speechAttenuationDb` or lower to disable the gate and its delay |
 | `pauseGateLookaheadFrames` | `3` | Frames (10 ms each) the gate delays the output by, so it is open when a word starts. The gate ramps open over them. `1` cuts 20 ms of delay, and opens the gate in one step instead. Keep it above `minSpeechFrames` |
@@ -190,15 +188,6 @@ reframe 128-sample quanta into 480-sample frames, and 30 ms of gate lookahead
 Serve `DeepFilterNet3_onnx.tar.gz` as is. If the server adds
 `Content-Encoding: gzip`, the browser inflates it; the package gzips it again,
 at some CPU cost.
-
-### Low-latency model
-
-`model: "low-latency"` loads DeepFilterNet3_ll, which has no lookahead: 10 ms of
-model delay instead of 30 ms, the same quality, but about four times the
-compute per frame and a 35 MB model, fetched only when asked for. It is
-experimental: measure it on the machines you target first (see
-[Choose a model](#choose-a-model)). Shortening the gate lookahead
-(`pauseGateLookaheadFrames: 1`) also cuts 20 ms, at no CPU cost.
 
 ## DTLN
 
@@ -291,9 +280,7 @@ import { createNoiseSuppressionAudioWorklet } from "@workadventure/noise-suppres
 
 In the normal worklet path, consumers should not need to configure model URLs,
 Wasm URLs, or worklet processor URLs. Each entrypoint loads its packaged
-processor bundle and models, resolved relative to the module. The
-low-latency DeepFilterNet3 model is a separate file, fetched only when
-`model: "low-latency"` is asked for; bundlers still copy it.
+processor bundle and models, resolved relative to the module.
 
 If your application serves assets from a constrained location, you can override
 the URLs:
@@ -558,7 +545,7 @@ Useful local pages:
 - `/browser-benchmark-litert.html`: LiteRT benchmark page
 - `/browser-benchmark-compare.html`: single-threaded vs threaded comparison
 - `/browser-benchmark-litert-manual.html`: DevTools benchmark helper harness
-- `/engine-benchmark.html`: speed of the three noise suppression models on this
+- `/engine-benchmark.html`: speed of the noise suppression models on this
   machine ([engine benchmark](./docs/experiments/engine-benchmark/README.md))
 
 The Vite dev server is configured with COOP and COEP headers so
@@ -593,7 +580,7 @@ The library build writes:
 - `dist/assets/audio-worklet-processor.js`
 - `dist/assets/deepfilternet-worklet-processor.js`
 - `dist/assets/*.tflite`
-- `dist/assets/deepfilternet/*` (Wasm and both DeepFilterNet3 models)
+- `dist/assets/deepfilternet/*` (Wasm and model)
 - `dist/vendor/litert/*`
 - `dist/vendor/silero/*`
 - `dist/vendor/onnxruntime/*`
