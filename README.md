@@ -183,8 +183,10 @@ that supports threaded Wasm loading.
   model files, so the worklet path does not need the application to host those
   files separately.
 
-The processor buffers four 128-sample render quanta into one 512-sample DTLN
-frame, then writes the denoised samples back to an output ring buffer.
+The processor runs one DTLN block shift (128 samples) per render quantum. DTLN
+keeps its 512-sample analysis window internally, so this is bit-identical to
+feeding it 512 samples at a time, while spreading the inference cost evenly
+across callbacks.
 
 ## Bundlers
 

@@ -25,3 +25,4 @@ technical decisions in this repository.
 - [ADR 0007: Use LiteRT ESM Fork for AudioWorklet](./0007-use-litert-esm-fork-for-audioworklet.md)
 - [ADR 0008: Vendor libfvad for Background Noise Detection](./0008-vendor-libfvad-for-background-noise-detection.md)
 - [ADR 0009: Use Silero VAD Web for Background Noise Detection](./0009-use-silero-vad-web-for-background-noise-detection.md)
+- [ADR 0010: Run One DTLN Block Shift per Render Quantum](./0010-run-one-dtln-block-shift-per-render-quantum.md)
