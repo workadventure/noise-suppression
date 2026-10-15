@@ -66,7 +66,8 @@ export async function createBackgroundNoiseDetector(
     ),
   ]);
 
-  let state: ort.Tensor = new ort.Tensor("float32", new Float32Array(2 * 128), [2, 1, 128]);
+  const blankState = new ort.Tensor("float32", new Float32Array(2 * 128), [2, 1, 128]);
+  let state: ort.Tensor = blankState;
   const sr = new ort.Tensor("int64", [BigInt(SILERO_SAMPLE_RATE)]);
   let disposed = false;
   // Frames run one after the other: each one needs the state the previous one left.
@@ -81,16 +82,22 @@ export async function createBackgroundNoiseDetector(
         if (disposed) {
           return;
         }
-        const output = await session.run({
-          input: new ort.Tensor("float32", frame, [1, frame.length]),
-          state,
-          sr,
-        });
-        state = output["stateN"] as ort.Tensor;
-        const result = detector.processFrame(frame, {
-          speechProbability: (output["output"] as ort.Tensor).data[0] as number,
-          durationMs: (frame.length / SILERO_SAMPLE_RATE) * 1000,
-        });
+        const durationMs = (frame.length / SILERO_SAMPLE_RATE) * 1000;
+        let speechProbability = 0;
+        // Most frames are quiet ones the detector would not read the probability of: no Silero for them, and it
+        // starts afresh when the sound comes back.
+        if (detector.needsSpeechProbability(frame, durationMs)) {
+          const output = await session.run({
+            input: new ort.Tensor("float32", frame, [1, frame.length]),
+            state,
+            sr,
+          });
+          state = output["stateN"] as ort.Tensor;
+          speechProbability = (output["output"] as ort.Tensor).data[0] as number;
+        } else {
+          state = blankState;
+        }
+        const result = detector.processFrame(frame, { speechProbability, durationMs });
         if (result.event !== null && !disposed) {
           dispatchMessage(messageTarget, result.event);
         }
