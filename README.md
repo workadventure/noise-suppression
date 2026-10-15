@@ -350,9 +350,9 @@ The background-noise detector identifies sustained input that is loud but
 unlikely to contain speech. It can be used to suggest enabling noise suppression
 when a user has a noisy microphone.
 
-The detector uses Silero VAD through `@ricky0123/vad-web`. It analyzes a supplied
-`MediaStream` but does not modify the stream, play it, or enable DTLN noise
-suppression.
+The detector runs the Silero VAD v5 model with ONNX Runtime Web. It analyzes a
+supplied `MediaStream` but does not modify the stream, play it, or enable DTLN
+noise suppression.
 
 ```ts
 import {
@@ -404,8 +404,8 @@ a detector handle:
   duration
 - `dispose()`: stops VAD processing and releases its internal resources
 
-The creation promise rejects if the Silero model, helper worklet, or ONNX Runtime
-cannot be initialized.
+The creation promise rejects if the Silero model, the capture worklet, or ONNX
+Runtime cannot be initialized.
 
 The caller retains ownership of the supplied stream. Calling `dispose()` does
 not stop its tracks or close the `AudioContext`.
@@ -428,13 +428,6 @@ Detector options and defaults:
 | `maxSpeechFrameRatio` | `0.75` | Maximum ratio of speech frames in the window |
 | `maxAverageSpeechProbability` | `0.5` | Maximum average speech probability in the window |
 | `cooldownMs` | `15000` | Minimum delay between emitted events |
-| `sileroModel` | `"v5"` | Silero model; `"legacy"` is also available |
-| `processorType` | `"AudioWorklet"` | Frame-capture mechanism used internally by `vad-web` |
-
-The Silero integration also forwards `positiveSpeechThreshold`,
-`negativeSpeechThreshold`, `redemptionMs`, `preSpeechPadMs`, and `minSpeechMs`
-to `@ricky0123/vad-web`. In most integrations, tune the detector-level rules
-first and leave these VAD-specific options unchanged.
 
 A `background-noise-detected` message contains:
 
@@ -480,25 +473,19 @@ The background-noise detector is a separate package entrypoint. Applications
 that only import the noise-suppression APIs do not initialize Silero or ONNX
 Runtime Web.
 
-The package includes the Silero model, the VAD helper worklet, and ONNX Runtime
-Web assets under `dist/vendor/`. Their default URLs are resolved relative to the
-`background-noise.js` module. A deployment must preserve those files and serve
-`.js`, `.mjs`, `.wasm`, and `.onnx` files with appropriate MIME types and CORS
-headers.
+Every file is referenced by its own `new URL("…", import.meta.url)`, like the
+other models, so a bundler can hash, move, or copy each one and still load it:
+no bundler configuration is needed.
 
-For deployments that copy these assets elsewhere, override both base paths:
+- The Silero model ships as `dist/assets/silero_vad_v5.onnx`.
+- ONNX Runtime Web is a regular dependency. Its own build locates its `.wasm`
+  file the same way, and the JavaScript and the Wasm always come from the same
+  installed version.
+- The capture worklet (mono, averaged down to 16 kHz, 512-sample frames) ships
+  inside `background-noise.js` and loads from a `blob:` URL. A page with a
+  Content-Security-Policy must allow `blob:` in `script-src`.
 
-```ts
-const detector = await createBackgroundNoiseDetector(context, stream, {
-  baseAssetPath: "/assets/noise-detector/silero/",
-  onnxWASMBasePath: "/assets/noise-detector/onnxruntime/",
-});
-```
-
-The package does not expose a dedicated background-noise `AudioWorkletNode`.
-With the default `processorType`, `@ricky0123/vad-web` still uses its own small
-helper worklet for audio capture and framing; Silero inference runs outside the
-audio render callback.
+Silero inference runs on the main thread, outside the audio render callback.
 
 ## Advanced: Synchronous Frame API (DTLN)
 
@@ -608,9 +595,8 @@ The library build writes:
 - `dist/assets/deepfilternet-worklet-processor.js`
 - `dist/assets/*.tflite`
 - `dist/assets/deepfilternet/*` (Wasm and model)
+- `dist/assets/silero_vad_v5.onnx`
 - `dist/vendor/litert/*`
-- `dist/vendor/silero/*`
-- `dist/vendor/onnxruntime/*`
 
 ## Architecture Notes
 

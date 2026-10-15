@@ -1,36 +1,15 @@
-import { MicVAD, type RealTimeVADOptions } from "@ricky0123/vad-web";
-import {
-  defaultBackgroundNoiseDetectorBaseAssetPath,
-  defaultBackgroundNoiseDetectorOnnxWasmBasePath,
-} from "virtual:background-noise-detector-silero-assets";
+import * as ort from "onnxruntime-web/wasm";
+import sileroModelUrl from "virtual:background-noise-detector-silero-model-url";
+import captureProcessorSource from "virtual:background-noise-capture-processor-source";
 import {
   BackgroundNoiseDetector,
-  DEFAULT_BACKGROUND_NOISE_DETECTOR_OPTIONS,
   type BackgroundNoiseDetectorOptions,
 } from "./background-noise/detector";
 import type { BackgroundNoiseDetectedMessage } from "./background-noise/detector";
 
-export type BackgroundNoiseDetectorSileroModel = "v5" | "legacy";
+export type BackgroundNoiseDetectorSileroModel = "v5";
 
-export interface BackgroundNoiseDetectorRuntimeOptions {
-  sileroModel?: BackgroundNoiseDetectorSileroModel;
-  baseAssetPath?: string;
-  onnxWASMBasePath?: string;
-  positiveSpeechThreshold?: number;
-  negativeSpeechThreshold?: number;
-  redemptionMs?: number;
-  preSpeechPadMs?: number;
-  minSpeechMs?: number;
-  processorType?: RealTimeVADOptions["processorType"];
-  triggerRms?: number;
-  noisyRms?: number;
-  analysisWindowMs?: number;
-  maxSpeechFrameRatio?: number;
-  maxVoiceFrameRatio?: number;
-  speechProbabilityThreshold?: number;
-  maxAverageSpeechProbability?: number;
-  cooldownMs?: number;
-}
+export type BackgroundNoiseDetectorRuntimeOptions = BackgroundNoiseDetectorOptions;
 
 export interface BackgroundNoiseDetectorReadyMessage {
   type: "ready";
@@ -56,64 +35,85 @@ export interface BackgroundNoiseDetectorHandle {
   dispose(): void;
 }
 
-const DEFAULT_SILERO_MODEL: BackgroundNoiseDetectorSileroModel = "v5";
 const SILERO_SAMPLE_RATE = 16000;
-const SILERO_FRAME_SAMPLES: Record<BackgroundNoiseDetectorSileroModel, number> = {
-  v5: 512,
-  legacy: 1536,
-};
+const SILERO_FRAME_SAMPLES = 512;
+const CAPTURE_PROCESSOR_NAME = "workadventure-background-noise-capture";
 const handleMessageTargets = new WeakMap<BackgroundNoiseDetectorHandle, EventTarget>();
+
+// The capture processor ships inside this module and loads from a blob: URL, so there is no worklet file for a
+// bundler to rename or inline. A page with a Content-Security-Policy must allow blob: in script-src. One URL for the
+// page's lifetime: AudioWorklet loads a URL once per context, a second registerProcessor() would throw.
+let captureProcessorUrl: string | undefined;
 
 export async function createBackgroundNoiseDetector(
   context: AudioContext,
   stream: MediaStream,
   options: BackgroundNoiseDetectorRuntimeOptions = {}
 ): Promise<BackgroundNoiseDetectorHandle> {
-  const sileroModel = options.sileroModel ?? DEFAULT_SILERO_MODEL;
-  const frameSamples = SILERO_FRAME_SAMPLES[sileroModel];
-  const detector = new BackgroundNoiseDetector(createDetectorOptions(options));
+  const detector = new BackgroundNoiseDetector(options);
   const messageTarget = new EventTarget();
+
+  // Silero is small: one thread, so ONNX Runtime never spawns workers.
+  ort.env.wasm.numThreads = 1;
+  const [session] = await Promise.all([
+    fetch(sileroModelUrl)
+      .then((response) => response.arrayBuffer())
+      .then((model) => ort.InferenceSession.create(model)),
+    context.audioWorklet.addModule(
+      (captureProcessorUrl ??= URL.createObjectURL(
+        new Blob([captureProcessorSource], { type: "text/javascript" })
+      ))
+    ),
+  ]);
+
+  const blankState = new ort.Tensor("float32", new Float32Array(2 * 128), [2, 1, 128]);
+  let state: ort.Tensor = blankState;
+  const sr = new ort.Tensor("int64", [BigInt(SILERO_SAMPLE_RATE)]);
   let disposed = false;
+  // Frames run one after the other: each one needs the state the previous one left.
+  let inference = Promise.resolve();
 
-  const vad = await MicVAD.new({
-    audioContext: context,
-    baseAssetPath:
-      options.baseAssetPath ?? defaultBackgroundNoiseDetectorBaseAssetPath,
-    onnxWASMBasePath:
-      options.onnxWASMBasePath ?? defaultBackgroundNoiseDetectorOnnxWasmBasePath,
-    model: sileroModel,
-    processorType: options.processorType ?? "AudioWorklet",
-    startOnLoad: true,
-    getStream: async () => stream,
-    pauseStream: async () => undefined,
-    resumeStream: async () => stream,
-    onFrameProcessed: (probabilities, frame) => {
-      if (disposed) {
-        return;
-      }
-
-      const result = detector.processFrame(frame, {
-        speechProbability: probabilities.isSpeech,
-        durationMs: (frame.length / SILERO_SAMPLE_RATE) * 1000,
+  const source = context.createMediaStreamSource(stream);
+  const capture = new AudioWorkletNode(context, CAPTURE_PROCESSOR_NAME);
+  capture.port.onmessage = (event: MessageEvent<Float32Array>) => {
+    const frame = event.data;
+    inference = inference
+      .then(async () => {
+        if (disposed) {
+          return;
+        }
+        const durationMs = (frame.length / SILERO_SAMPLE_RATE) * 1000;
+        let speechProbability = 0;
+        // Most frames are quiet ones the detector would not read the probability of: no Silero for them, and it
+        // starts afresh when the sound comes back.
+        if (detector.needsSpeechProbability(frame, durationMs)) {
+          const output = await session.run({
+            input: new ort.Tensor("float32", frame, [1, frame.length]),
+            state,
+            sr,
+          });
+          state = output["stateN"] as ort.Tensor;
+          speechProbability = (output["output"] as ort.Tensor).data[0] as number;
+        } else {
+          state = blankState;
+        }
+        const result = detector.processFrame(frame, { speechProbability, durationMs });
+        if (result.event !== null && !disposed) {
+          dispatchMessage(messageTarget, result.event);
+        }
+      })
+      .catch((error: unknown) => {
+        console.error("Background noise detection failed on a frame", error);
       });
-
-      if (result.event !== null) {
-        dispatchMessage(messageTarget, result.event);
-      }
-    },
-    onSpeechStart: () => undefined,
-    onSpeechRealStart: () => undefined,
-    onSpeechEnd: () => undefined,
-    onVADMisfire: () => undefined,
-    ...createOptionalVadOptions(options),
-  });
+  };
+  source.connect(capture);
 
   const readyMessage: BackgroundNoiseDetectorReadyMessage = {
     type: "ready",
     sampleRate: SILERO_SAMPLE_RATE,
-    frameSamples,
-    frameDurationMs: (frameSamples / SILERO_SAMPLE_RATE) * 1000,
-    sileroModel,
+    frameSamples: SILERO_FRAME_SAMPLES,
+    frameDurationMs: (SILERO_FRAME_SAMPLES / SILERO_SAMPLE_RATE) * 1000,
+    sileroModel: "v5",
   };
 
   const handle: BackgroundNoiseDetectorHandle = {
@@ -125,7 +125,10 @@ export async function createBackgroundNoiseDetector(
 
       disposed = true;
       detector.reset();
-      void vad.destroy().catch(() => undefined);
+      source.disconnect();
+      capture.port.postMessage("stop");
+      capture.port.onmessage = null;
+      void inference.then(() => session.release()).catch(() => undefined);
     },
   };
 
@@ -161,61 +164,6 @@ export function isBackgroundNoiseDetectedMessage(
 }
 
 export type { BackgroundNoiseDetectedMessage };
-
-function createDetectorOptions(
-  options: BackgroundNoiseDetectorRuntimeOptions
-): BackgroundNoiseDetectorOptions {
-  const detectorOptions: BackgroundNoiseDetectorOptions = {
-    triggerRms:
-      options.triggerRms ?? DEFAULT_BACKGROUND_NOISE_DETECTOR_OPTIONS.triggerRms,
-    noisyRms: options.noisyRms ?? DEFAULT_BACKGROUND_NOISE_DETECTOR_OPTIONS.noisyRms,
-    analysisWindowMs:
-      options.analysisWindowMs ??
-      DEFAULT_BACKGROUND_NOISE_DETECTOR_OPTIONS.analysisWindowMs,
-    maxSpeechFrameRatio:
-      options.maxSpeechFrameRatio ??
-      options.maxVoiceFrameRatio ??
-      DEFAULT_BACKGROUND_NOISE_DETECTOR_OPTIONS.maxSpeechFrameRatio,
-    speechProbabilityThreshold:
-      options.speechProbabilityThreshold ??
-      options.positiveSpeechThreshold ??
-      DEFAULT_BACKGROUND_NOISE_DETECTOR_OPTIONS.speechProbabilityThreshold,
-    maxAverageSpeechProbability:
-      options.maxAverageSpeechProbability ??
-      DEFAULT_BACKGROUND_NOISE_DETECTOR_OPTIONS.maxAverageSpeechProbability,
-    cooldownMs: options.cooldownMs ?? DEFAULT_BACKGROUND_NOISE_DETECTOR_OPTIONS.cooldownMs,
-  };
-
-  return detectorOptions;
-}
-
-function createOptionalVadOptions(
-  options: BackgroundNoiseDetectorRuntimeOptions
-): Partial<RealTimeVADOptions> {
-  const vadOptions: Partial<RealTimeVADOptions> = {};
-
-  if (options.positiveSpeechThreshold !== undefined) {
-    vadOptions.positiveSpeechThreshold = options.positiveSpeechThreshold;
-  }
-
-  if (options.negativeSpeechThreshold !== undefined) {
-    vadOptions.negativeSpeechThreshold = options.negativeSpeechThreshold;
-  }
-
-  if (options.redemptionMs !== undefined) {
-    vadOptions.redemptionMs = options.redemptionMs;
-  }
-
-  if (options.preSpeechPadMs !== undefined) {
-    vadOptions.preSpeechPadMs = options.preSpeechPadMs;
-  }
-
-  if (options.minSpeechMs !== undefined) {
-    vadOptions.minSpeechMs = options.minSpeechMs;
-  }
-
-  return vadOptions;
-}
 
 function dispatchMessage(
   target: EventTarget,

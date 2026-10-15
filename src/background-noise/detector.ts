@@ -128,6 +128,18 @@ export class BackgroundNoiseDetector {
     return { frame: result, event };
   }
 
+  /**
+   * Whether processFrame() will read the speech probability of this frame (the next one, without an explicit
+   * timestamp). It ignores it during the cooldown, and for a quiet frame while no window is open: the caller can skip
+   * the VAD for those.
+   */
+  needsSpeechProbability(frame: Float32Array, durationMs: number): boolean {
+    return (
+      !this.isCoolingDown(this.elapsedMs + durationMs) &&
+      (this.candidateWindow !== null || calculateRms(frame) >= this.options.triggerRms)
+    );
+  }
+
   reset(): void {
     this.candidateWindow = null;
     this.lastEventTimestampMs = null;

@@ -99,6 +99,27 @@ describe("background noise detector", () => {
     expect(events[1]?.timestampMs).toBe(210);
   });
 
+  test("needs the speech probability only of the frames it reads it for", () => {
+    const detector = new BackgroundNoiseDetector({
+      analysisWindowMs: 60,
+      cooldownMs: 100,
+    });
+    const quiet = createFrame(0.001);
+    const loud = createFrame(0.03);
+
+    expect(detector.needsSpeechProbability(quiet, FRAME_DURATION_MS)).toBe(false);
+    expect(detector.needsSpeechProbability(loud, FRAME_DURATION_MS)).toBe(true);
+
+    processFrames(detector, 1, 0.03);
+    expect(detector.needsSpeechProbability(quiet, FRAME_DURATION_MS)).toBe(true);
+
+    expect(processFrames(detector, 1, 0.03)[0]?.event).not.toBeNull();
+    expect(detector.needsSpeechProbability(loud, FRAME_DURATION_MS)).toBe(false);
+
+    processFrames(detector, 3, 0.03);
+    expect(detector.needsSpeechProbability(loud, FRAME_DURATION_MS)).toBe(true);
+  });
+
   test("validates options and rejects empty RMS frames", () => {
     expect(() => new BackgroundNoiseDetector({ maxSpeechFrameRatio: 1.1 })).toThrow(
       /maxSpeechFrameRatio must be between 0 and 1/

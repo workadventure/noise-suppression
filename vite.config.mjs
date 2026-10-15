@@ -12,9 +12,6 @@ const audioWorkletModuleUrlVirtualId =
   "virtual:noise-suppression-audio-worklet-module-url";
 const defaultAssetsVirtualId = "virtual:noise-suppression-default-assets";
 const resolvedDefaultAssetsVirtualId = `\0${defaultAssetsVirtualId}`;
-const backgroundNoiseDetectorSileroAssetsVirtualId =
-  "virtual:background-noise-detector-silero-assets";
-const resolvedBackgroundNoiseDetectorSileroAssetsVirtualId = `\0${backgroundNoiseDetectorSileroAssetsVirtualId}`;
 const demoPageFileNames = [
   "index.html",
   "runtime.html",
@@ -59,27 +56,6 @@ const packagedModelAssets = [
     fileName: "assets/model_quant_2.tflite",
   },
 ];
-
-const packagedSileroAssets = [
-  "vad.worklet.bundle.min.js",
-  "silero_vad_legacy.onnx",
-  "silero_vad_v5.onnx",
-].map((fileName) => ({
-  source: path.resolve(rootDir, "node_modules/@ricky0123/vad-web/dist", fileName),
-  fileName: `vendor/silero/${fileName}`,
-}));
-
-const packagedOnnxRuntimeAssets = fs
-  .readdirSync(path.resolve(rootDir, "node_modules/onnxruntime-web/dist"))
-  .filter(
-    (fileName) =>
-      fileName.startsWith("ort-wasm") &&
-      (fileName.endsWith(".wasm") || fileName.endsWith(".mjs"))
-  )
-  .map((fileName) => ({
-    source: path.resolve(rootDir, "node_modules/onnxruntime-web/dist", fileName),
-    fileName: `vendor/onnxruntime/${fileName}`,
-  }));
 
 function bytesPlugin() {
   const bytesQuery = "?bytes";
@@ -330,63 +306,41 @@ export const defaultDeepFilterNetModelUrl = import.meta.ROLLUP_FILE_URL_${modelR
   };
 }
 
-function backgroundNoiseDetectorSileroAssetsPlugin() {
+function backgroundNoiseDetectorAssetsPlugin() {
+  const modelVirtualId = "virtual:background-noise-detector-silero-model-url";
+  const captureVirtualId = "virtual:background-noise-capture-processor-source";
   let command = "build";
 
   return {
-    name: "background-noise-detector-silero-assets",
+    name: "background-noise-detector-assets",
     configResolved(config) {
       command = config.command;
     },
     resolveId(source) {
-      if (source === backgroundNoiseDetectorSileroAssetsVirtualId) {
-        return resolvedBackgroundNoiseDetectorSileroAssetsVirtualId;
+      return source === modelVirtualId || source === captureVirtualId ? `\0${source}` : null;
+    },
+    async load(id) {
+      if (id === `\0${captureVirtualId}`) {
+        const code = await buildAudioWorkletDevBundle("src/background-noise-capture-processor.ts");
+        return `export default ${JSON.stringify(code)};`;
       }
 
-      return null;
-    },
-    load(id) {
-      if (id !== resolvedBackgroundNoiseDetectorSileroAssetsVirtualId) {
+      if (id !== `\0${modelVirtualId}`) {
         return null;
       }
 
       if (command === "serve") {
-        return `
-export const defaultBackgroundNoiseDetectorBaseAssetPath = "/node_modules/@ricky0123/vad-web/dist/";
-export const defaultBackgroundNoiseDetectorOnnxWasmBasePath = "/node_modules/onnxruntime-web/dist/";
-`;
+        return `export default "/model/silero_vad_v5.onnx";`;
       }
 
-      const sileroAssetReferences = packagedSileroAssets.map((asset) =>
-        this.emitFile({
-          type: "asset",
-          fileName: asset.fileName,
-          source: fs.readFileSync(asset.source),
-        })
-      );
-      const onnxRuntimeAssetReferences = packagedOnnxRuntimeAssets.map((asset) =>
-        this.emitFile({
-          type: "asset",
-          fileName: asset.fileName,
-          source: fs.readFileSync(asset.source),
-        })
-      );
+      // One exact URL, like the other models: a consumer's bundler can hash the file and still point at it.
+      const modelReference = this.emitFile({
+        type: "asset",
+        fileName: "assets/silero_vad_v5.onnx",
+        source: fs.readFileSync(path.resolve(rootDir, "model/silero_vad_v5.onnx")),
+      });
 
-      return `
-const sileroAssetUrls = [
-  ${sileroAssetReferences.map((referenceId) => `import.meta.ROLLUP_FILE_URL_${referenceId}`).join(",\n  ")}
-];
-const onnxRuntimeAssetUrls = [
-  ${onnxRuntimeAssetReferences.map((referenceId) => `import.meta.ROLLUP_FILE_URL_${referenceId}`).join(",\n  ")}
-];
-
-export const defaultBackgroundNoiseDetectorBaseAssetPath = assetDirectory(sileroAssetUrls[0]);
-export const defaultBackgroundNoiseDetectorOnnxWasmBasePath = assetDirectory(onnxRuntimeAssetUrls[0]);
-
-function assetDirectory(assetUrl) {
-  return assetUrl.slice(0, assetUrl.lastIndexOf("/") + 1);
-}
-`;
+      return `export default import.meta.ROLLUP_FILE_URL_${modelReference};`;
     },
   };
 }
@@ -456,7 +410,7 @@ export default defineConfig(({ command, mode }) => {
     plugins: [
       bytesPlugin(),
       defaultAssetsPlugin(),
-      backgroundNoiseDetectorSileroAssetsPlugin(),
+      backgroundNoiseDetectorAssetsPlugin(),
       audioWorkletBundlePlugin(),
       audioWorkletBundlePlugin({
         virtualId: "virtual:deepfilternet-audio-worklet-module-url",
@@ -524,7 +478,7 @@ export default defineConfig(({ command, mode }) => {
           target: "es2022",
           sourcemap: true,
           rollupOptions: {
-            external: ["@ricky0123/vad-web", "fft.js", "node:fs", "node:url"],
+            external: ["onnxruntime-web/wasm", "fft.js", "node:fs", "node:url"],
             output: {
               assetFileNames(assetInfo) {
                 const originalFileName =
@@ -536,14 +490,6 @@ export default defineConfig(({ command, mode }) => {
 
                 if (originalFileName.includes("forks/litertjs-core/wasm/")) {
                   return "vendor/litert/[name][extname]";
-                }
-
-                if (originalFileName.includes("@ricky0123/vad-web/dist/")) {
-                  return "vendor/silero/[name][extname]";
-                }
-
-                if (originalFileName.includes("onnxruntime-web/dist/")) {
-                  return "vendor/onnxruntime/[name][extname]";
                 }
 
                 return "assets/[name]-[hash][extname]";

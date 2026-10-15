@@ -14,7 +14,6 @@ import {
 import "./styles.css";
 
 type SourceMode = "microphone" | "clip";
-type SileroModel = NonNullable<BackgroundNoiseDetectorRuntimeOptions["sileroModel"]>;
 
 interface ActiveGraph {
   context: AudioContext;
@@ -87,14 +86,6 @@ app.innerHTML = `
       </label>
 
       <label class="stacked-control">
-        <span>Silero model</span>
-        <select id="silero-model-select">
-          <option value="v5" selected>V5</option>
-          <option value="legacy">Legacy</option>
-        </select>
-      </label>
-
-      <label class="stacked-control">
         <span>Speech threshold</span>
         <input id="speech-threshold-input" type="number" min="0" max="1" step="0.01" value="0.3">
       </label>
@@ -164,7 +155,6 @@ const sourceModeSelect = mustQuery<HTMLSelectElement>("#source-mode-select");
 const clipSelect = mustQuery<HTMLSelectElement>("#clip-select");
 const outputGainInput = mustQuery<HTMLInputElement>("#output-gain-input");
 const microphoneFeedbackInput = mustQuery<HTMLInputElement>("#microphone-feedback-input");
-const sileroModelSelect = mustQuery<HTMLSelectElement>("#silero-model-select");
 const speechThresholdInput = mustQuery<HTMLInputElement>("#speech-threshold-input");
 const maxSpeechRatioInput = mustQuery<HTMLInputElement>("#max-speech-ratio-input");
 const maxAverageSpeechInput = mustQuery<HTMLInputElement>("#max-average-speech-input");
@@ -244,8 +234,6 @@ function readDetectorOptions(): BackgroundNoiseDetectorRuntimeOptions {
   );
 
   return {
-    sileroModel: sileroModelSelect.value as SileroModel,
-    positiveSpeechThreshold: speechProbabilityThreshold,
     speechProbabilityThreshold,
     triggerRms: finiteInputValue(triggerRmsInput, "Trigger RMS"),
     noisyRms: finiteInputValue(noisyRmsInput, "Noisy RMS"),
