@@ -83,6 +83,10 @@ jobs:
         env:
           VITEST_BROWSER: ${{ matrix.browser }}
 
+      - name: Run the built package in a Vite app (dev server and production build)
+        if: matrix.browser == 'chromium'
+        run: npm run build && npm run test:consumer
+
   publish:
     name: Publish Package
     needs:
