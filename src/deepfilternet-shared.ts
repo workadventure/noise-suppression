@@ -59,3 +59,18 @@ export type DeepFilterNetAudioWorkletOutboundMessage =
   | DeepFilterNetAudioWorkletErrorMessage
   | DeepFilterNetAudioWorkletOverloadMessage
   | DeepFilterNetAudioWorkletLoadReportMessage;
+
+/** Passes the input through without running the model, until `resume`. */
+export interface DeepFilterNetAudioWorkletPauseMessage {
+  type: "pause";
+}
+
+/** Runs the model again on fresh buffers, and re-arms the overload check so it can report once more. */
+export interface DeepFilterNetAudioWorkletResumeMessage {
+  type: "resume";
+}
+
+export type DeepFilterNetAudioWorkletInboundMessage =
+  | DeepFilterNetAudioWorkletDisposeMessage
+  | DeepFilterNetAudioWorkletPauseMessage
+  | DeepFilterNetAudioWorkletResumeMessage;

@@ -135,6 +135,15 @@ describe("LoadMonitor", () => {
     const reports = Array.from({ length: 40 }, () => monitor.record(8)).filter((report) => report !== undefined);
     expect(reports).toEqual([0.8]);
   });
+
+  test("reports again after reset", () => {
+    const monitor = new LoadMonitor(10, frameMs, 0.7);
+    const beforeReset = Array.from({ length: 40 }, () => monitor.record(8)).filter((report) => report !== undefined);
+    monitor.reset();
+    const afterReset = Array.from({ length: 40 }, () => monitor.record(8)).filter((report) => report !== undefined);
+    expect(beforeReset).toEqual([0.8]);
+    expect(afterReset).toEqual([0.8]);
+  });
 });
 
 describe("LoadSampler", () => {

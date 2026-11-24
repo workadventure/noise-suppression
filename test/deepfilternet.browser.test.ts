@@ -154,6 +154,25 @@ describe("DeepFilterNet3 AudioWorklet", { timeout: 60_000 }, () => {
     return (await decoder.decodeAudioData(bytes)).getChannelData(0);
   }
 
+  test("passes the input through unchanged while paused", async () => {
+    const input = seededNoise(DEEPFILTERNET_SAMPLE_RATE, 0.05);
+    const context = new OfflineAudioContext(1, input.length, DEEPFILTERNET_SAMPLE_RATE);
+    const handle = await createDeepFilterNetAudioWorklet(context, { bypassUntilReady: false });
+    await handle.ready;
+    handle.pause();
+    // The message reaches the processor on the audio thread, before rendering starts.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const buffer = new AudioBuffer({ length: input.length, sampleRate: DEEPFILTERNET_SAMPLE_RATE, numberOfChannels: 1 });
+    buffer.getChannelData(0).set(input);
+    const source = new AudioBufferSourceNode(context, { buffer });
+    source.connect(handle.node).connect(context.destination);
+    source.start();
+    const output = (await context.startRendering()).getChannelData(0);
+    handle.dispose();
+
+    expect(Math.max(...output.map((sample, index) => Math.abs(sample - input[index]!)))).toBe(0);
+  });
+
   test("reports its measured load once through onLoadReport", async () => {
     const seconds = 5;
     const context = new OfflineAudioContext(1, seconds * DEEPFILTERNET_SAMPLE_RATE, DEEPFILTERNET_SAMPLE_RATE);

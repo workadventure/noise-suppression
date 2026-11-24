@@ -166,6 +166,12 @@ Rust implementation, compiled to Wasm by `scripts/build-deepfilternet-wasm.sh`
 - `dispose()`: disconnects the node and stops processing. The model's Wasm
   memory is released when the `AudioContext` is closed: close it when you are
   done, rather than creating nodes again and again in the same context
+- `pause()`: passes the input through without running the model, until
+  `resume()`. Use it to back off when the machine cannot keep up: building a new
+  node runs the model setup on the audio rendering thread, which stalls every
+  node of that `AudioContext` (about 90 ms on an M-series Mac)
+- `resume()`: runs the model again on fresh buffers, and re-arms the overload
+  check so `onOverload` can fire once more
 
 It throws if the `AudioContext` does not run at 48 kHz.
 
@@ -179,7 +185,7 @@ Options, all optional:
 | `minSpeechFrames` | `1` | Consecutive speech frames the gate needs before opening. `2` keeps brief keystrokes the model lets through from opening it |
 | `postGain` | `false` | Level the voice after the model (`true` or `Partial<PostGainOptions>`, defaults in `DEFAULT_POST_GAIN`). Meant to replace the browser's automatic gain control, which runs before the model and raises the noise too: set `autoGainControl: false` on the microphone when enabling it |
 | `maxLoad` | `0.7` | Share of real time the model may use before `onOverload` fires; `0` disables the check |
-| `onOverload` | | Called once, with the load, when two 2 s windows in a row exceed `maxLoad`. The node keeps running: switch to DTLN or to the raw microphone |
+| `onOverload` | | Called once, with the load, when two 2 s windows in a row exceed `maxLoad`. The node keeps running: `pause()` it for a while, or switch to DTLN or to the raw microphone. After `resume()` it can fire again |
 | `onLoadReport` | | `(report: LoadReport) => void`, called once for telemetry with `windows`, `medianLoad`, `p95Load`, `maxLoad` (share of real time per 2 s window), `slowFrames` (frames measured at 3 ms or more) and `frames` |
 | `loadReportAfterMs` | `60000` | Processed audio before that report, rounded to 2 s windows (at least one). `0` disables it |
 | `bypassUntilReady` | `true` | Pass the microphone through while the processor initializes and after it fails; otherwise silence |

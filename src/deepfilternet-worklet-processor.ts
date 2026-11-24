@@ -12,8 +12,8 @@ import { LoadMonitor, LoadSampler } from "./load-monitor";
 import {
   DEEPFILTERNET_AUDIO_WORKLET_PROCESSOR_NAME,
   DEEPFILTERNET_SAMPLE_RATE,
-  type DeepFilterNetAudioWorkletDisposeMessage,
   type DeepFilterNetAudioWorkletErrorMessage,
+  type DeepFilterNetAudioWorkletInboundMessage,
   type DeepFilterNetAudioWorkletOverloadMessage,
   type DeepFilterNetAudioWorkletLoadReportMessage,
   type DeepFilterNetAudioWorkletProcessorOptions,
@@ -39,14 +39,19 @@ class DeepFilterNetProcessor extends AudioWorkletProcessor {
   private loadSampler: LoadSampler | undefined;
   private readonly inputRing = new Float32RingBuffer(RING_BUFFER_CAPACITY);
   private readonly outputRing = new Float32RingBuffer(RING_BUFFER_CAPACITY);
+  private paused = false;
 
   constructor(options: AudioWorkletNodeOptions) {
     super();
     const processorOptions = options.processorOptions as DeepFilterNetAudioWorkletProcessorOptions;
     this.bypassUntilReady = processorOptions.bypassUntilReady;
-    this.port.onmessage = (event: MessageEvent<DeepFilterNetAudioWorkletDisposeMessage>) => {
+    this.port.onmessage = (event: MessageEvent<DeepFilterNetAudioWorkletInboundMessage>) => {
       if (event.data.type === "dispose") {
         this.state = undefined;
+      } else if (event.data.type === "pause") {
+        this.paused = true;
+      } else if (event.data.type === "resume") {
+        this.resume();
       }
     };
 
@@ -103,6 +108,10 @@ class DeepFilterNetProcessor extends AudioWorkletProcessor {
       }
       return true;
     }
+    if (this.paused) {
+      output.set(input.subarray(0, output.length));
+      return true;
+    }
 
     try {
       this.inputRing.push(input);
@@ -137,6 +146,14 @@ class DeepFilterNetProcessor extends AudioWorkletProcessor {
       }
     }
     return true;
+  }
+
+  /** Drops the audio buffered before the pause, so the model does not resume on stale input. */
+  private resume(): void {
+    this.paused = false;
+    this.inputRing.clear();
+    this.outputRing.clear();
+    this.loadMonitor?.reset();
   }
 
   private fail(error: unknown): void {
