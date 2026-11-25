@@ -32,6 +32,14 @@ export class LoadMonitor {
     }
     return undefined;
   }
+
+  /** Starts over, so two more overloaded windows in a row report again. */
+  reset(): void {
+    this.framesInWindow = 0;
+    this.busyMs = 0;
+    this.overloadedWindows = 0;
+    this.reported = false;
+  }
 }
 
 /** What the processor measured about its own cost, once, after `reportAfterWindows` windows. */

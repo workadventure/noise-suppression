@@ -7,6 +7,8 @@ import {
   DEEPFILTERNET_AUDIO_WORKLET_PROCESSOR_NAME,
   DEEPFILTERNET_SAMPLE_RATE,
   type DeepFilterNetAudioWorkletDisposeMessage,
+  type DeepFilterNetAudioWorkletPauseMessage,
+  type DeepFilterNetAudioWorkletResumeMessage,
   type DeepFilterNetAudioWorkletOutboundMessage,
   type DeepFilterNetAudioWorkletProcessorOptions,
   type DeepFilterNetAudioWorkletReadyMessage,
@@ -69,6 +71,13 @@ export interface DeepFilterNetAudioWorkletHandle {
   node: AudioWorkletNode;
   ready: Promise<DeepFilterNetAudioWorkletReadyMessage>;
   dispose(): void;
+  /**
+   * Passes the input through without running the model, until `resume`. Cheaper than disposing the node and building
+   * a new one, which runs the model setup on the audio rendering thread.
+   */
+  pause(): void;
+  /** Runs the model again on fresh buffers, and re-arms the overload check so `onOverload` can fire once more. */
+  resume(): void;
 }
 
 const DEFAULT_SPEECH_ATTENUATION_DB = 25;
@@ -243,6 +252,14 @@ export async function createDeepFilterNetAudioWorklet(
       const message: DeepFilterNetAudioWorkletDisposeMessage = { type: "dispose" };
       node.port.postMessage(message);
       node.disconnect();
+    },
+    pause(): void {
+      const message: DeepFilterNetAudioWorkletPauseMessage = { type: "pause" };
+      node.port.postMessage(message);
+    },
+    resume(): void {
+      const message: DeepFilterNetAudioWorkletResumeMessage = { type: "resume" };
+      node.port.postMessage(message);
     },
   };
 }
